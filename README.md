@@ -17,6 +17,7 @@ Upstream: <https://github.com/openfrontio/OpenFrontIO>
 | `tools/trainer/` | `openfront.patch` on the OpenFront client at the commit in `OPENFRONT_COMMIT`, and `build.sh` that builds TRAINER.PRO from it |
 | `public/js/replay-player.js` | The replay renderer; terrain colours, borders, rails, structure icons, name placement and fallout bloom follow OpenFront's client renderer and shaders |
 | `public/js/openfront-mapgen.js` | OpenFront's map generator (`map-generator/map_generator.go`) ported to JavaScript |
+| `public/map-creator.html`, `public/js/map-creator*.js`, `public/js/map-creator-flags.json` | Map Creator: paint a map, generate a world, import a real map from OpenFront's repo, and export it in the game's format (see below) |
 
 ### Templates
 
@@ -40,6 +41,29 @@ runs in its own Node process:
     tools/trainer/build.sh                                 # -> trainer/play/
 
 The other templates are bundled the same way as `build.js` does (same aliases and esbuild options).
+
+## Map Creator
+
+A browser tool that paints an OpenFront map and exports `map.bin`, `map4x.bin`, `map16x.bin`, `manifest.json`,
+`info.json`, `image.png` and `thumbnail.webp`, byte-identical to OpenFront's Go map generator.
+It is plain HTML and JavaScript, no build step and no server code.
+
+    npx serve public          # or any static file server with public/ as the root
+    # open http://localhost:3000/map-creator.html
+
+| File | What it does |
+| --- | --- |
+| `map-creator.html` | The page: toolbar, panels and styles |
+| `js/map-creator.js` | Editor: brushes, fill, height tools, nations, import from OpenFront's maps on GitHub, export |
+| `js/map-creator-worldgen.js` | World generator: seeded noise and shape presets |
+| `js/map-creator-physical.js` | Image to map: turns a physical/topographic map picture into land heights, water and void |
+| `js/map-creator-worker.js` | Runs `openfront-mapgen.js` in a Web Worker for the export |
+| `js/map-creator-flags.json` | Flag list for nations |
+| `css/theme.css`, `fonts/` | Site styles and fonts (Inter, Rajdhani, Orbitron, SIL OFL 1.1) |
+
+On teamstats.pro, logged-in users can also submit maps to a gallery. That part needs the site's server
+(`/api/me`, `/api/maps`), which is not in this repository, so standalone the Submit button only explains
+that login is not set up. Everything else runs in the browser (importing a map from OpenFront needs internet).
 
 ## Licence
 
