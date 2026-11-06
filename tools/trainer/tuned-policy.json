@@ -1,0 +1,797 @@
+{
+  "v": 1,
+  "rules": 3,
+  "round": 2888,
+  "games": 43679,
+  "trainings": 5,
+  "at": "2026-11-01T22:02:35.154Z",
+  "history": [
+    {
+      "round": 2148,
+      "map": "Australia",
+      "share": 1,
+      "poolShare": 0.75,
+      "style": null,
+      "changed": [
+        "botRamp 600 -> 312",
+        "port 0.339 -> 0.044"
+      ]
+    },
+    {
+      "round": 2154,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.75,
+      "style": null,
+      "changed": [
+        "growthRatio 0.42 -> 0.379",
+        "pressRatio 1.5 -> 1.707",
+        "stackRatio 0.333 -> 0.339"
+      ]
+    },
+    {
+      "round": 2178,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "every 1800 -> 1689"
+      ]
+    },
+    {
+      "round": 2200,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "braceTicks 150 -> 236"
+      ]
+    },
+    {
+      "round": 2206,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "raidEvery 649 -> 1037",
+        "cutoffWeight 1 -> 0.788"
+      ]
+    },
+    {
+      "round": 2221,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "cutoffWeight 0.788 -> 0.505",
+        "siloCities 3 -> 4"
+      ]
+    },
+    {
+      "round": 2223,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.75,
+      "style": null,
+      "changed": [
+        "attackRate 18 -> 15"
+      ]
+    },
+    {
+      "round": 2245,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "every 1689 -> 1800",
+        "raidEvery 1037 -> 986",
+        "breakOut 0.439 -> 0.497"
+      ]
+    },
+    {
+      "round": 2251,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "every 1800 -> 1661",
+        "snipeTiles 292 -> 208",
+        "braceTicks 236 -> 320"
+      ]
+    },
+    {
+      "round": 2264,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.75,
+      "style": "cap",
+      "changed": [
+        "growthRatio 0.379 -> 0.42",
+        "crushRatio 2.419 -> 2.5",
+        "pressRatio 1.707 -> 1.5",
+        "botRamp 312 -> 600",
+        "braceTicks 320 -> 150"
+      ]
+    },
+    {
+      "round": 2278,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": "boats",
+      "changed": [
+        "stackEvery 0 -> 900",
+        "stackRatio 0.339 -> 0.4"
+      ]
+    },
+    {
+      "round": 2317,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.625,
+      "style": "cap",
+      "changed": [
+        "stackEvery 900 -> 0"
+      ]
+    },
+    {
+      "round": 2325,
+      "map": "Australia",
+      "share": 0.875,
+      "poolShare": 0.625,
+      "style": "rush",
+      "changed": [
+        "growthRatio 0.42 -> 0.3",
+        "crushRatio 2.5 -> 1.4",
+        "raidEvery 986 -> 600",
+        "pressRatio 1.5 -> 0.8",
+        "braceTicks 150 -> 0"
+      ]
+    },
+    {
+      "round": 2340,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "snipeTiles 208 -> 88"
+      ]
+    },
+    {
+      "round": 2363,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "triggerRatio 0.693 -> 0.752",
+        "every 1661 -> 1515"
+      ]
+    },
+    {
+      "round": 2365,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "snipeTiles 88 -> 0"
+      ]
+    },
+    {
+      "round": 2385,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.75,
+      "style": null,
+      "changed": [
+        "reserveRatio 0.477 -> 0.505",
+        "raidEvery 600 -> 1042",
+        "botRamp 600 -> 395"
+      ]
+    },
+    {
+      "round": 2388,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "port 0.044 -> 0"
+      ]
+    },
+    {
+      "round": 2391,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "snipeTiles 0 -> 59"
+      ]
+    },
+    {
+      "round": 2409,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "triggerRatio 0.752 -> 0.856"
+      ]
+    },
+    {
+      "round": 2421,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.75,
+      "style": null,
+      "changed": [
+        "breakOut 0.497 -> 0.512",
+        "stackRatio 0.4 -> 0.342"
+      ]
+    },
+    {
+      "round": 2427,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "attackRate 15 -> 22",
+        "braceTicks 0 -> 19"
+      ]
+    },
+    {
+      "round": 2434,
+      "map": "Australia",
+      "share": 0.875,
+      "poolShare": 1,
+      "style": "rush",
+      "changed": [
+        "raidEvery 1042 -> 600",
+        "pressRatio 1.2 -> 0.8",
+        "braceTicks 19 -> 0"
+      ]
+    },
+    {
+      "round": 2442,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "expandRatio 0.169 -> 0.239",
+        "pressRatio 0.8 -> 1.2",
+        "stackRatio 0.342 -> 0.358"
+      ]
+    },
+    {
+      "round": 2450,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.75,
+      "style": null,
+      "changed": [
+        "every 1515 -> 1453",
+        "stackEvery 0 -> 63"
+      ]
+    },
+    {
+      "round": 2467,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "snipeTiles 59 -> 189"
+      ]
+    },
+    {
+      "round": 2488,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "triggerRatio 0.856 -> 0.95"
+      ]
+    },
+    {
+      "round": 2503,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "reserveRatio 0.505 -> 0.627",
+        "raidEvery 600 -> 1015",
+        "raidTicks 61 -> 73"
+      ]
+    },
+    {
+      "round": 2519,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "every 1453 -> 1286",
+        "raidEvery 1015 -> 648",
+        "lookahead 1.157 -> 0.859"
+      ]
+    },
+    {
+      "round": 2523,
+      "map": "Australia",
+      "share": 0.8125,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "punchRatio 0.12 -> 0.1",
+        "cutoffWeight 0.505 -> 0.554"
+      ]
+    },
+    {
+      "round": 2537,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "expandRatio 0.239 -> 0.281"
+      ]
+    },
+    {
+      "round": 2547,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "crushRatio 1.4 -> 1.969"
+      ]
+    },
+    {
+      "round": 2551,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.875,
+      "style": null,
+      "changed": [
+        "braceTicks 0 -> 32"
+      ]
+    },
+    {
+      "round": 2553,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "growthRatio 0.3 -> 0.36",
+        "snipeTiles 189 -> 251",
+        "atomGold 0 -> 451212"
+      ]
+    },
+    {
+      "round": 2570,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": "boats",
+      "changed": [
+        "punchRatio 0.1 -> 0.12",
+        "stackEvery 63 -> 900",
+        "stackRatio 0.358 -> 0.4"
+      ]
+    },
+    {
+      "round": 2579,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "growthRatio 0.36 -> 0.346"
+      ]
+    },
+    {
+      "round": 2590,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "stackEvery 900 -> 565"
+      ]
+    },
+    {
+      "round": 2618,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "crushRatio 1.969 -> 2.133",
+        "pressRatio 1.2 -> 1.202"
+      ]
+    },
+    {
+      "round": 2623,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "braceTicks 32 -> 73"
+      ]
+    },
+    {
+      "round": 2644,
+      "map": "Australia",
+      "share": 0.8125,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "atomGold 451212 -> 968802",
+        "siloCities 4 -> 3"
+      ]
+    },
+    {
+      "round": 2649,
+      "map": "Australia",
+      "share": 0.8125,
+      "poolShare": 0.5,
+      "style": "nuke",
+      "changed": [
+        "atomGold 968802 -> 1500000",
+        "siloCities 3 -> 2"
+      ]
+    },
+    {
+      "round": 2659,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.625,
+      "style": null,
+      "changed": [
+        "triggerRatio 0.95 -> 0.818",
+        "siloCities 2 -> 3"
+      ]
+    },
+    {
+      "round": 2663,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": "boats",
+      "changed": [
+        "stackEvery 565 -> 900"
+      ]
+    },
+    {
+      "round": 2713,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.5,
+      "style": "boats",
+      "changed": []
+    },
+    {
+      "round": 2719,
+      "map": "Australia",
+      "share": 0.6875,
+      "poolShare": 0.875,
+      "style": null,
+      "changed": [
+        "raidTicks 73 -> 68",
+        "stackRatio 0.4 -> 0.363",
+        "snipeTiles 251 -> 102"
+      ]
+    },
+    {
+      "round": 2722,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "every 1286 -> 1249",
+        "crushRatio 2.133 -> 1.564"
+      ]
+    },
+    {
+      "round": 2783,
+      "map": "Australia",
+      "share": 0.8125,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "every 1249 -> 1121"
+      ]
+    },
+    {
+      "round": 2789,
+      "map": "Australia",
+      "share": 0.75,
+      "poolShare": 0.5,
+      "style": null,
+      "changed": [
+        "attackRate 22 -> 34",
+        "crushRatio 1.564 -> 1.333",
+        "stackRatio 0.363 -> 0.407"
+      ]
+    }
+  ],
+  "maps": {
+    "Australia": {
+      "attack": {
+        "triggerRatio": 0.818,
+        "reserveRatio": 0.627,
+        "expandRatio": 0.281,
+        "attackRate": 20,
+        "growthRatio": 0.346,
+        "punchRatio": 0.12,
+        "crushRatio": 1.333,
+        "raidEvery": 648,
+        "raidTicks": 68,
+        "cutoffWeight": 0.554,
+        "breakOut": 0.512,
+        "pressRatio": 1.202,
+        "stackEvery": 900,
+        "stackRatio": 0.407,
+        "snipeTiles": 102,
+        "botRamp": 395,
+        "lookahead": 0.859,
+        "braceTicks": 73,
+        "atomGold": 1500000,
+        "defend": 1
+      },
+      "boats": {
+        "every": 1121
+      },
+      "structures": {
+        "ratioPerCity": {
+          "port": 0
+        },
+        "siloCities": 3
+      }
+    },
+    "Iceland": {
+      "attack": {
+        "triggerRatio": 0.394,
+        "reserveRatio": 0.312,
+        "expandRatio": 0.249,
+        "attackRate": 27,
+        "growthRatio": 0.374,
+        "punchRatio": 0.05,
+        "crushRatio": 2.462,
+        "raidEvery": 221,
+        "raidTicks": 32,
+        "cutoffWeight": 0,
+        "breakOut": 0.3,
+        "pressRatio": 1.2,
+        "stackEvery": 0,
+        "stackRatio": 0.4,
+        "snipeTiles": 400,
+        "botRamp": 900,
+        "lookahead": 0.5,
+        "braceTicks": 150,
+        "atomGold": 0
+      },
+      "boats": {
+        "every": 1450
+      },
+      "structures": {
+        "ratioPerCity": {
+          "port": 0
+        },
+        "siloCities": 3
+      }
+    },
+    "Asia": {
+      "attack": {
+        "triggerRatio": 0.34,
+        "reserveRatio": 0.292,
+        "expandRatio": 0.301,
+        "attackRate": 58,
+        "growthRatio": 0.354,
+        "punchRatio": 0.07,
+        "crushRatio": 2,
+        "raidEvery": 0,
+        "raidTicks": 20,
+        "cutoffWeight": 0,
+        "breakOut": 0.3,
+        "pressRatio": 1.2,
+        "stackEvery": 0,
+        "stackRatio": 0.4,
+        "snipeTiles": 400,
+        "botRamp": 900,
+        "lookahead": 0.5,
+        "braceTicks": 150,
+        "atomGold": 0
+      },
+      "boats": {
+        "every": 1114
+      },
+      "structures": {
+        "ratioPerCity": {
+          "port": 0.395
+        },
+        "siloCities": 3
+      }
+    },
+    "Europe Classic": {
+      "attack": {
+        "triggerRatio": 0.204,
+        "reserveRatio": 0.219,
+        "expandRatio": 0.301,
+        "attackRate": 36,
+        "growthRatio": 0.395,
+        "punchRatio": 0.07,
+        "crushRatio": 1.977,
+        "raidEvery": 241,
+        "raidTicks": 49,
+        "cutoffWeight": 0,
+        "breakOut": 0.3,
+        "pressRatio": 1.2,
+        "stackEvery": 0,
+        "stackRatio": 0.4,
+        "snipeTiles": 400,
+        "botRamp": 900,
+        "lookahead": 0.5,
+        "braceTicks": 150,
+        "atomGold": 0
+      },
+      "boats": {
+        "every": 1114
+      },
+      "structures": {
+        "ratioPerCity": {
+          "port": 0
+        },
+        "siloCities": 3
+      }
+    }
+  },
+  "pool": {
+    "Australia": [
+      {
+        "attack": {
+          "triggerRatio": 0.818,
+          "reserveRatio": 0.627,
+          "expandRatio": 0.281,
+          "attackRate": 22,
+          "growthRatio": 0.346,
+          "punchRatio": 0.12,
+          "crushRatio": 1.564,
+          "raidEvery": 648,
+          "raidTicks": 68,
+          "cutoffWeight": 0.554,
+          "breakOut": 0.512,
+          "pressRatio": 1.202,
+          "stackEvery": 900,
+          "stackRatio": 0.363,
+          "snipeTiles": 102,
+          "botRamp": 395,
+          "lookahead": 0.859,
+          "braceTicks": 73,
+          "atomGold": 1500000
+        },
+        "boats": {
+          "every": 1121
+        },
+        "structures": {
+          "ratioPerCity": {
+            "port": 0
+          },
+          "siloCities": 3
+        }
+      },
+      {
+        "attack": {
+          "triggerRatio": 0.818,
+          "reserveRatio": 0.627,
+          "expandRatio": 0.281,
+          "attackRate": 22,
+          "growthRatio": 0.346,
+          "punchRatio": 0.12,
+          "crushRatio": 1.564,
+          "raidEvery": 648,
+          "raidTicks": 68,
+          "cutoffWeight": 0.554,
+          "breakOut": 0.512,
+          "pressRatio": 1.202,
+          "stackEvery": 900,
+          "stackRatio": 0.363,
+          "snipeTiles": 102,
+          "botRamp": 395,
+          "lookahead": 0.859,
+          "braceTicks": 73,
+          "atomGold": 1500000
+        },
+        "boats": {
+          "every": 1249
+        },
+        "structures": {
+          "ratioPerCity": {
+            "port": 0
+          },
+          "siloCities": 3
+        }
+      },
+      {
+        "attack": {
+          "triggerRatio": 0.818,
+          "reserveRatio": 0.627,
+          "expandRatio": 0.281,
+          "attackRate": 22,
+          "growthRatio": 0.346,
+          "punchRatio": 0.12,
+          "crushRatio": 2.133,
+          "raidEvery": 648,
+          "raidTicks": 68,
+          "cutoffWeight": 0.554,
+          "breakOut": 0.512,
+          "pressRatio": 1.202,
+          "stackEvery": 900,
+          "stackRatio": 0.363,
+          "snipeTiles": 102,
+          "botRamp": 395,
+          "lookahead": 0.859,
+          "braceTicks": 73,
+          "atomGold": 1500000
+        },
+        "boats": {
+          "every": 1286
+        },
+        "structures": {
+          "ratioPerCity": {
+            "port": 0
+          },
+          "siloCities": 3
+        }
+      },
+      {
+        "attack": {
+          "triggerRatio": 0.818,
+          "reserveRatio": 0.627,
+          "expandRatio": 0.281,
+          "attackRate": 22,
+          "growthRatio": 0.346,
+          "punchRatio": 0.12,
+          "crushRatio": 2.133,
+          "raidEvery": 648,
+          "raidTicks": 73,
+          "cutoffWeight": 0.554,
+          "breakOut": 0.512,
+          "pressRatio": 1.202,
+          "stackEvery": 900,
+          "stackRatio": 0.4,
+          "snipeTiles": 251,
+          "botRamp": 395,
+          "lookahead": 0.859,
+          "braceTicks": 73,
+          "atomGold": 1500000
+        },
+        "boats": {
+          "every": 1286
+        },
+        "structures": {
+          "ratioPerCity": {
+            "port": 0
+          },
+          "siloCities": 3
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,3830 @@
+diff --git a/packages/engine-api/src/Schemas.ts b/packages/engine-api/src/Schemas.ts
+index c20a9cc8..8deb90de 100644
+--- a/packages/engine-api/src/Schemas.ts
++++ b/packages/engine-api/src/Schemas.ts
+@@ -309,6 +309,10 @@ export const GameConfigSchema = z.object({
+   customAllianceDuration: zb.uint({ max: 15 }).nullable().optional(), // In minutes; 0 disables alliances
+   startDelay: zb.uint({ max: 600 }).nullable().optional(), // In seconds
+   spawnImmunityDuration: zb.uint().nullable().optional(), // In ticks
++  // TRAINER.PRO: learned bot settings (JSON), read by the trainer nation.
++  trainerPolicy: z.string().max(400000).optional(),
++  // TRAINER.PRO: name shown for the opponent nation (flag removed)
++  trainerBotName: z.string().max(40).optional(),
+   disabledUnits: z.enum(UnitType).array().optional(),
+   playerTeams: TeamCountConfigSchema.optional(),
+   goldMultiplier: zb.float({ min: 0.1, max: 1000 }).nullable().optional(),
+diff --git a/packages/engine-lib/src/configuration/Config.ts b/packages/engine-lib/src/configuration/Config.ts
+index 3d0f547a..568362fc 100644
+--- a/packages/engine-lib/src/configuration/Config.ts
++++ b/packages/engine-lib/src/configuration/Config.ts
+@@ -353,6 +353,9 @@ export class Config {
+       return maxTroops;
+     }
+ 
++    // TRAINER.PRO: the bot gets the same troops as the human (ranked 1v1 rules)
++    if (this._gameConfig.trainerBotName !== undefined) return maxTroops;
++
+     switch (this._gameConfig.difficulty) {
+       case Difficulty.Easy:
+         return maxTroops * 0.5;
+@@ -379,7 +382,10 @@ export class Config {
+       toAdd *= 0.5;
+     }
+ 
+-    if (player.type() === PlayerType.Nation) {
++    if (
++      player.type() === PlayerType.Nation &&
++      this._gameConfig.trainerBotName === undefined
++    ) {
+       switch (this._gameConfig.difficulty) {
+         case Difficulty.Easy:
+           toAdd *= 0.9;
+diff --git a/packages/engine/src/configuration/EngineConfig.ts b/packages/engine/src/configuration/EngineConfig.ts
+index 58adbece..789c0ab3 100644
+--- a/packages/engine/src/configuration/EngineConfig.ts
++++ b/packages/engine/src/configuration/EngineConfig.ts
+@@ -622,7 +622,10 @@ export class EngineConfig extends Config {
+     if (playerInfo.playerType === PlayerType.Bot) {
+       return 10_000;
+     }
+-    if (playerInfo.playerType === PlayerType.Nation) {
++    if (
++      playerInfo.playerType === PlayerType.Nation &&
++      this._gameConfig.trainerBotName === undefined
++    ) {
+       switch (this._gameConfig.difficulty) {
+         case Difficulty.Easy:
+           return 12_500;
+diff --git a/packages/engine/src/execution/NationExecution.ts b/packages/engine/src/execution/NationExecution.ts
+index 9a6cae59..fd960a31 100644
+--- a/packages/engine/src/execution/NationExecution.ts
++++ b/packages/engine/src/execution/NationExecution.ts
+@@ -21,8 +21,8 @@ import { assertNever, simpleHash } from "@openfront/engine-lib/Util";
+ import { z } from "zod";
+ import { Execution, Game, Player } from "../game/Game";
+ import {
+-  NationSchema,
+   nationData,
++  NationSchema,
+   newCell,
+   readPlayerInfo,
+ } from "../snapshot/CommonSchemas";
+@@ -38,14 +38,32 @@ import { NationMIRVBehavior } from "./nation/NationMIRVBehavior";
+ import { NationNukeBehavior } from "./nation/NationNukeBehavior";
+ import { NationStructureBehavior } from "./nation/NationStructureBehavior";
+ import { NationWarshipBehavior } from "./nation/NationWarshipBehavior";
++import {
++  isTrainerGame,
++  learnedAttackRate,
++  learnedRatio,
++  TRAINER_HYDRO_GOLD,
++  trainerPolicy,
++} from "./nation/TrainerPolicy";
+ import { SpawnExecution } from "./SpawnExecution";
++import { getSpawnTiles } from "./Util";
+ import { AiAttackBehavior } from "./utils/AiAttackBehavior";
+ 
++// TRAINER.PRO spawn choice (trainerBestSpawn): how much a spawn far from the ocean and one near
++// the human cost, against the tribes' land per troop around it
++const TRAINER_SPAWN_SEA_WEIGHT = 2;
++const TRAINER_SPAWN_HUMAN_WEIGHT = 3;
++
+ export class NationExecution implements Execution {
+   private active = true;
+   private random: PseudoRandom;
+   private behaviorsInitialized = false;
+   private spawnExecAdded = false;
++  // TRAINER.PRO: tick our SpawnExecution was queued. It can find its tile taken by then
++  // (another spawn landed there the same tick) and give up: then we pick again.
++  private spawnExecTick: number | null = null;
++  // TRAINER.PRO: the human spawn tile our spot was picked against (we move when theirs does)
++  private pickedAgainst: TileRef | undefined = undefined;
+   private emojiBehavior!: NationEmojiBehavior;
+   private mirvBehavior!: NationMIRVBehavior;
+   private attackBehavior!: AiAttackBehavior;
+@@ -79,6 +97,23 @@ export class NationExecution implements Execution {
+   init(mg: Game) {
+     this.mg = mg;
+     this.attackRate = this.getAttackRate();
++    // TRAINER.PRO: numbers learned from top players replace the random ones.
++    const learned = trainerPolicy(mg, this.nation.playerInfo.name)?.attack;
++    if (learned) {
++      this.triggerRatio =
++        learnedRatio(learned.triggerRatio) ?? this.triggerRatio;
++      this.reserveRatio =
++        learnedRatio(learned.reserveRatio) ?? this.reserveRatio;
++      this.expandRatio = learnedRatio(learned.expandRatio) ?? this.expandRatio;
++      const rate = learnedAttackRate(learned.attackRate);
++      if (rate !== undefined) {
++        // Difficulty still sets the reaction speed around the learned pace.
++        const speed = { Easy: 1.6, Medium: 1.2, Hard: 1, Impossible: 0.8 }[
++          mg.config().gameConfig().difficulty
++        ];
++        this.attackRate = Math.max(10, Math.round(rate * speed));
++      }
++    }
+     this.attackTick = this.random.nextInt(0, this.attackRate);
+ 
+     if (!this.mg.hasPlayer(this.nation.playerInfo.id)) {
+@@ -121,6 +156,47 @@ export class NationExecution implements Execution {
+       return;
+     }
+ 
++    // TRAINER.PRO (Bembe, 2026-11-01): the bot spawns after the human, at the spot that suits
++    // it best against theirs (trainerBestSpawn), and moves at once whenever they move theirs
++    // during the spawn phase. If the phase is already over, it spawns right after it.
++    if (this.waitsForHuman()) {
++      if (this.mg.inSpawnPhase()) {
++        const theirs = this.mg
++          .allPlayers()
++          .find((p) => p.type() === PlayerType.Human)
++          ?.spawnTile();
++        if (theirs === undefined || theirs === this.pickedAgainst) return;
++        if (
++          this.spawnExecAdded &&
++          !this.player.hasSpawned() &&
++          !this.spawnFailed(ticks)
++        )
++          return;
++        const tile = this.trainerBestSpawn();
++        if (tile === null) return;
++        this.pickedAgainst = theirs;
++        this.mg.addExecution(
++          new SpawnExecution(this.gameID, this.nation.playerInfo, tile),
++        );
++        this.spawnExecAdded = true;
++        this.spawnExecTick = ticks;
++        return;
++      }
++      if (!this.spawnExecAdded && !this.player.hasSpawned()) {
++        const tile = this.trainerBestSpawn();
++        this.mg.addExecution(
++          new SpawnExecution(
++            this.gameID,
++            this.nation.playerInfo,
++            tile ?? undefined,
++          ),
++        );
++        this.spawnExecAdded = true;
++        this.spawnExecTick = ticks;
++        return;
++      }
++    }
++
+     if (this.mg.inSpawnPhase()) {
+       if (this.player.hasSpawned()) {
+         // Already on the map — periodically re-spawn so the nation
+@@ -130,7 +206,8 @@ export class NationExecution implements Execution {
+         }
+       } else if (this.spawnExecAdded) {
+         // First SpawnExecution already queued, wait for it to land.
+-        return;
++        if (!this.spawnFailed(ticks)) return;
++        this.spawnExecAdded = false;
+       }
+       // Place nations without a spawn cell (Dynamically created for HumansVsNations) randomly by SpawnExecution
+       if (this.nation.spawnCell === undefined) {
+@@ -175,11 +252,20 @@ export class NationExecution implements Execution {
+         new SpawnExecution(this.gameID, this.nation.playerInfo, rl),
+       );
+       this.spawnExecAdded = true;
++      this.spawnExecTick = ticks;
+       return;
+     }
+ 
+     // Spawn phase already ended but our SpawnExecution hasn't fired yet — wait.
+     if (this.spawnExecAdded && !this.player.hasSpawned()) {
++      // TRAINER.PRO: it failed and the phase is over: without this the bot never showed up
++      // (1 in ~300 self-play games). A spawn anywhere free instead.
++      if (isTrainerGame(this.mg) && this.spawnFailed(ticks)) {
++        this.mg.addExecution(
++          new SpawnExecution(this.gameID, this.nation.playerInfo),
++        );
++        this.spawnExecTick = null;
++      }
+       return;
+     }
+ 
+@@ -196,6 +282,8 @@ export class NationExecution implements Execution {
+     }
+ 
+     this.attackBehavior.followUpLandings();
++    this.attackBehavior.endTrainerRaid();
++    this.attackBehavior.noteStackBoats();
+     this.nukeBehavior.followUpStrikes();
+ 
+     if (ticks % this.attackRate !== this.attackTick) {
+@@ -222,6 +310,29 @@ export class NationExecution implements Execution {
+     this.allianceBehavior.handleAllianceExtensionRequests();
+     this.mirvBehavior.considerMIRV();
+     this.structureBehavior.handleStructures();
++    // TRAINER.PRO: keep a silo while the opponent has one (to nuke it) or once we
++    // can afford the hydrogen bomb; a silo they destroy gets rebuilt. It also goes up
++    // early, with siloCities cities: one built only after theirs loses the race to nuke
++    // the other silo first (Bembe, 2026-10-13, after Kris's 4 atom bombs).
++    const opponent = this.nukeBehavior.trainerOpponent();
++    const siloCities = Math.round(
++      Math.min(
++        10,
++        Math.max(
++          1,
++          trainerPolicy(this.mg, this.nation.playerInfo.name)?.structures
++            ?.siloCities ?? 3,
++        ),
++      ),
++    );
++    if (
++      opponent !== null &&
++      (opponent.units(UnitType.MissileSilo).length > 0 ||
++        this.player.gold() >= TRAINER_HYDRO_GOLD ||
++        this.player.unitsOwned(UnitType.City) >= siloCities)
++    ) {
++      this.structureBehavior.buildSiloIfMissing();
++    }
+     this.warshipBehavior.maybeSpawnWarship();
+     this.handleEmbargoesToHostileNations();
+     this.attackBehavior.maybeAttack();
+@@ -281,14 +392,126 @@ export class NationExecution implements Execution {
+     this.behaviorsInitialized = true;
+   }
+ 
++  /** A TRAINER.PRO game with a human opponent: we spawn after them. */
++  private waitsForHuman(): boolean {
++    return (
++      isTrainerGame(this.mg) &&
++      this.mg.allPlayers().some((p) => p.type() === PlayerType.Human)
++    );
++  }
++
++  /**
++   * TRAINER.PRO: where to spawn once the human has. Candidates: the spots top players use
++   * and a spread of free land. Each scores the tribes within reach by land per troop
++   * (cheap land, quick to wall in and annex), wants the ocean within reach (an inland
++   * spawn got ringed and annexed by Bembe, 2026-11-01) and stays away from the human.
++   */
++  private trainerBestSpawn(): TileRef | null {
++    const mg = this.mg;
++    const human = mg
++      .allPlayers()
++      .find(
++        (p) => p.type() === PlayerType.Human && p.spawnTile() !== undefined,
++      );
++    const humanTile = human?.spawnTile();
++    const tribes = mg
++      .allPlayers()
++      .filter(
++        (p) =>
++          p.type() === PlayerType.Bot &&
++          p.isAlive() &&
++          p.spawnTile() !== undefined,
++      );
++    const candidates: TileRef[] = [];
++    const spawns = trainerPolicy(mg, this.nation.playerInfo.name)?.spawns?.[
++      mg.config().gameConfig().gameMap
++    ];
++    for (const [nx, ny] of spawns ?? []) {
++      const x = Math.round(nx * (mg.width() - 1));
++      const y = Math.round(ny * (mg.height() - 1));
++      if (mg.isValidCoord(x, y)) candidates.push(mg.ref(x, y));
++    }
++    for (let i = 0; i < 300; i++) {
++      candidates.push(
++        mg.ref(
++          this.random.nextInt(0, mg.width()),
++          this.random.nextInt(0, mg.height()),
++        ),
++      );
++    }
++    // Ocean shore, sampled on a coarse grid, to measure how far the sea is
++    const shore: TileRef[] = [];
++    for (let y = 0; y < mg.height(); y += 6) {
++      for (let x = 0; x < mg.width(); x += 6) {
++        const t = mg.ref(x, y);
++        if (mg.isLand(t) && mg.isOceanShore(t)) shore.push(t);
++      }
++    }
++    const reach = Math.max(
++      40,
++      Math.round(Math.min(mg.width(), mg.height()) / 12),
++    );
++    let best: TileRef | null = null;
++    let bestScore = -Infinity;
++    for (const c of candidates) {
++      if (!mg.isLand(c) || mg.hasOwner(c) || mg.isImpassable(c)) continue;
++      if (getSpawnTiles(mg, c, false).length < 10) continue;
++      let land = 0;
++      for (const b of tribes) {
++        const d = Math.sqrt(mg.euclideanDistSquared(c, b.spawnTile()!));
++        if (d <= reach * 2)
++          land +=
++            (b.numTilesOwned() / Math.max(1, b.troops())) *
++            (1 - d / (reach * 2));
++      }
++      let sea = Infinity;
++      for (const t of shore) sea = Math.min(sea, mg.manhattanDist(c, t));
++      const toHuman =
++        humanTile === undefined
++          ? Infinity
++          : Math.sqrt(mg.euclideanDistSquared(c, humanTile));
++      const score =
++        land -
++        (sea > reach ? (sea - reach) / reach : 0) * TRAINER_SPAWN_SEA_WEIGHT -
++        (toHuman < reach * 2 ? (reach * 2 - toHuman) / reach : 0) *
++          TRAINER_SPAWN_HUMAN_WEIGHT;
++      if (score > bestScore) {
++        bestScore = score;
++        best = c;
++      }
++    }
++    return best;
++  }
++
++  /** Our queued SpawnExecution ran (it runs the next tick) and we are still not on the map. */
++  private spawnFailed(ticks: number): boolean {
++    return (
++      this.spawnExecTick !== null &&
++      ticks - this.spawnExecTick >= 3 &&
++      this.player !== null &&
++      !this.player.hasSpawned()
++    );
++  }
++
+   private randomSpawnLand(): TileRef | null {
+     if (this.nation.spawnCell === undefined) throw new Error("not initialized");
+ 
+     const delta = 25;
++    // TRAINER.PRO: spawn where top players spawn on this map.
++    const spawns = trainerPolicy(this.mg, this.nation.playerInfo.name)
++      ?.spawns?.[this.mg.config().gameConfig().gameMap];
++    let learnedCell: { x: number; y: number } | undefined;
++    if (spawns !== undefined && spawns.length > 0) {
++      const [nx, ny] = spawns[this.random.nextInt(0, spawns.length)];
++      learnedCell = {
++        x: Math.round(nx * (this.mg.width() - 1)),
++        y: Math.round(ny * (this.mg.height() - 1)),
++      };
++    }
+     let tries = 0;
+     while (tries < 50) {
+       tries++;
+-      const cell = this.nation.spawnCell;
++      const cell = learnedCell ?? this.nation.spawnCell;
+       const x = this.random.nextInt(cell.x - delta, cell.x + delta);
+       const y = this.random.nextInt(cell.y - delta, cell.y + delta);
+       if (!this.mg.isValidCoord(x, y)) {
+@@ -410,6 +633,7 @@ export class NationExecution implements Execution {
+       expandRatio: this.expandRatio,
+       embargoMalusApplied: [...this.embargoMalusApplied],
+       spawnExecAdded: this.spawnExecAdded,
++      spawnExecTick: this.spawnExecTick,
+       behaviors: this.behaviorsInitialized
+         ? {
+             emoji: this.emojiBehavior.snapshot(w),
+@@ -448,6 +672,7 @@ export class NationExecution implements Execution {
+     this.expandRatio = s.expandRatio;
+     this.embargoMalusApplied = new Set(s.embargoMalusApplied);
+     this.spawnExecAdded = s.spawnExecAdded;
++    this.spawnExecTick = s.spawnExecTick ?? null;
+     this.behaviorsInitialized = s.behaviors !== null;
+     const b = s.behaviors;
+     const player = this.player;
+@@ -503,6 +728,7 @@ const NationStateSchema = z.object({
+   expandRatio: zNum(),
+   embargoMalusApplied: z.array(z.string()),
+   spawnExecAdded: z.boolean(),
++  spawnExecTick: zNum().nullable().optional(),
+   behaviors: z
+     .object({
+       emoji: VersionedSchema,
+diff --git a/packages/engine/src/execution/nation/BotAnnexation.ts b/packages/engine/src/execution/nation/BotAnnexation.ts
+index 657927ee..a39d084d 100644
+--- a/packages/engine/src/execution/nation/BotAnnexation.ts
++++ b/packages/engine/src/execution/nation/BotAnnexation.ts
+@@ -28,11 +28,14 @@ export function walledInBots(
+ }
+ 
+ // Bots to attack, best first: a checkerboard of bots across our front and the row behind it is
+-// left to be annexed for free, and the bots walling them in go first
++// left to be annexed for free, and the bots walling them in go first. `lookahead` (TRAINER.PRO,
++// Kris/Bembe 2026-10-13: bot choice decides how fast you grow) also counts the land of the bots
++// behind a front bot that only taking it opens up, shared between the front bots touching them.
+ export function planBotAttacks(
+   game: Game,
+   player: Player,
+   bots: Player[],
++  lookahead = 0,
+ ): Player[] {
+   const scanner = new BotScanner(game, player);
+   const region = new Map<Player, BotSurroundings>();
+@@ -73,9 +76,32 @@ export function planBotAttacks(
+     }
+   }
+ 
+-  // Most land per bot troop, counting the land it walls in
++  // The land behind each front bot that taking it opens up
++  const opensUp = new Map<Player, number>();
++  if (lookahead > 0) {
++    const frontSet = new Set(front);
++    const touchedBy = new Map<Player, number>();
++    for (const bot of front) {
++      for (const other of region.get(bot)!.bots) {
++        if (!frontSet.has(other))
++          touchedBy.set(other, (touchedBy.get(other) ?? 0) + 1);
++      }
++    }
++    for (const bot of front) {
++      let land = 0;
++      for (const other of region.get(bot)!.bots) {
++        const n = touchedBy.get(other);
++        if (n !== undefined) land += other.numTilesOwned() / n;
++      }
++      opensUp.set(bot, land * lookahead);
++    }
++  }
++
++  // Most land per bot troop, counting the land it walls in (and opens up)
+   const value = (bot: Player) =>
+-    (bot.numTilesOwned() + (walledIn.get(bot) ?? 0)) /
++    (bot.numTilesOwned() +
++      (walledIn.get(bot) ?? 0) +
++      (opensUp.get(bot) ?? 0)) /
+     Math.max(1, bot.troops());
+   const byValue = (a: Player, b: Player) => value(b) - value(a);
+   const targets = bots
+diff --git a/packages/engine/src/execution/nation/NationAllianceBehavior.ts b/packages/engine/src/execution/nation/NationAllianceBehavior.ts
+index 1a20269a..16e84bed 100644
+--- a/packages/engine/src/execution/nation/NationAllianceBehavior.ts
++++ b/packages/engine/src/execution/nation/NationAllianceBehavior.ts
+@@ -60,6 +60,11 @@ export class NationAllianceBehavior {
+     if (this.game.config().disableAlliances()) return;
+ 
+     for (const req of this.player.incomingAllianceRequests()) {
++      // TRAINER.PRO: the bot plays ranked 1v1, where nobody allies
++      if (this.isTrainerBot()) {
++        req.reject();
++        continue;
++      }
+       // Alliance Request intents created during the spawn phase are executed on
+       // the first tick post-spawn phase. With the following condition we reject
+       // all requests created during the spawn phase.
+@@ -81,7 +86,7 @@ export class NationAllianceBehavior {
+     for (const alliance of this.player.alliances()) {
+       // Alliance expiration tracked by Events Panel, only human ally can click Request to Renew
+       // Skip if no expiration yet/ ally didn't request extension yet / nation already agreed to extend
+-      if (!alliance.onlyOneAgreedToExtend()) continue;
++      if (!alliance.onlyOneAgreedToExtend() || this.isTrainerBot()) continue;
+ 
+       const human = alliance.other(this.player);
+       if (!this.getAllianceDecision(human, true)) continue;
+@@ -92,8 +97,12 @@ export class NationAllianceBehavior {
+     }
+   }
+ 
++  private isTrainerBot(): boolean {
++    return this.game.config().gameConfig().trainerBotName !== undefined;
++  }
++
+   maybeSendAllianceRequests(borderingEnemies: Player[]) {
+-    if (this.game.config().disableAlliances()) return;
++    if (this.game.config().disableAlliances() || this.isTrainerBot()) return;
+ 
+     // Only easy nations are allowed to send alliance requests to bots
+     const isAcceptablePlayerType = (p: Player) =>
+diff --git a/packages/engine/src/execution/nation/NationNukeBehavior.ts b/packages/engine/src/execution/nation/NationNukeBehavior.ts
+index 0708e704..0f711292 100644
+--- a/packages/engine/src/execution/nation/NationNukeBehavior.ts
++++ b/packages/engine/src/execution/nation/NationNukeBehavior.ts
+@@ -40,6 +40,12 @@ import {
+   isSaveUpWithinReach,
+   randTerritoryTileArray,
+ } from "./NationUtils";
++import {
++  isTrainerGame,
++  TRAINER_HYDRO_GOLD,
++  trainerAttackPlan,
++  trainerOpponentOf,
++} from "./TrainerPolicy";
+ 
+ /** Cap on silo levels reachable via maybeDestroyEnemySam's upgrade fallback. */
+ const MAX_NATION_SILO_UPGRADE_LEVEL = 5;
+@@ -166,6 +172,128 @@ export class NationNukeBehavior {
+     }));
+   }
+ 
++  /** TRAINER.PRO: the opponent the trainer bot nukes (the human; the other bot in self-play), or null. */
++  trainerOpponent(): Player | null {
++    return trainerOpponentOf(this.game, this.player);
++  }
++
++  // TRAINER.PRO rules (Bembe): a SAM going up gets an atom bomb before it is finished;
++  // with 5M gold a hydrogen bomb where it destroys the most cities (2026-10-14: also when
++  // they have a silo, the attack follows it, see AiAttackBehavior); their missile silos
++  // always get an atom bomb. Nothing is fired one bomb at a time into a finished SAM:
++  // those get a salvo big enough to get through (maybeDestroyEnemySam) first.
++  private trainerNukes(opponent: Player, silos: Unit[]): void {
++    if (silos.length === 0) return;
++    const config = this.game.config();
++    const gold = this.player.gold();
++    const atoms =
++      !config.isUnitDisabled(UnitType.AtomBomb) &&
++      gold >= this.cost(UnitType.AtomBomb);
++    const shielded = (tile: TileRef) =>
++      this.findEnemySamsCoveringTile(tile).some(
++        (sam) => !sam.isUnderConstruction(),
++      );
++    const fire = (
++      tile: TileRef,
++      type: UnitType.AtomBomb | UnitType.HydrogenBomb,
++    ) => {
++      if (this.isNukeAlreadyLandingNear(tile, type)) return false;
++      if (this.player.canBuild(type, tile) === false) return false;
++      this.sendNuke(tile, type, opponent);
++      return true;
++    };
++    const sams = opponent.units(UnitType.SAMLauncher);
++    if (atoms) {
++      for (const sam of sams) {
++        if (
++          sam.isUnderConstruction() &&
++          !shielded(sam.tile()) &&
++          fire(sam.tile(), UnitType.AtomBomb)
++        ) {
++          return;
++        }
++      }
++    }
++    if (
++      !config.isUnitDisabled(UnitType.HydrogenBomb) &&
++      gold >= TRAINER_HYDRO_GOLD &&
++      gold >= this.cost(UnitType.HydrogenBomb)
++    ) {
++      const best = this.trainerCityTarget(
++        opponent,
++        UnitType.HydrogenBomb,
++        shielded,
++      );
++      if (best !== null && fire(best, UnitType.HydrogenBomb)) return;
++    }
++    if (atoms) {
++      for (const silo of opponent.units(UnitType.MissileSilo)) {
++        if (!shielded(silo.tile()) && fire(silo.tile(), UnitType.AtomBomb))
++          return;
++      }
++    }
++    if (sams.some((sam) => !sam.isUnderConstruction())) {
++      this.maybeDestroyEnemySam(opponent);
++      return;
++    }
++    // Nuke style (Kris beat the bot with 4 atom bombs, 2026-10-13): with atomGold to
++    // spare, an atom bomb where it hits the most of their cities
++    const atomGold =
++      trainerAttackPlan(this.game, this.player.name())?.atomGold ?? 0;
++    if (
++      atoms &&
++      atomGold > 0 &&
++      gold >= BigInt(atomGold) &&
++      gold < TRAINER_HYDRO_GOLD
++    ) {
++      const best = this.trainerCityTarget(
++        opponent,
++        UnitType.AtomBomb,
++        shielded,
++      );
++      if (best !== null) fire(best, UnitType.AtomBomb);
++    }
++  }
++
++  /** The opponent's city where this bomb destroys the most city levels, or null. */
++  private trainerCityTarget(
++    opponent: Player,
++    type: UnitType.AtomBomb | UnitType.HydrogenBomb,
++    skip: (tile: TileRef) => boolean,
++  ): TileRef | null {
++    const cities = opponent.units(UnitType.City);
++    if (cities.length === 0) return null;
++    // Cities first; defense posts count a little (Bembe: "raczej w miasta")
++    const posts = opponent.units(UnitType.DefensePost);
++    const radius = this.game.config().nukeMagnitudes(type).outer;
++    let best: { tile: TileRef; hits: number } | null = null;
++    for (const city of cities) {
++      const tile = city.tile();
++      if (this.isNukeAlreadyLandingNear(tile, type)) continue;
++      if (skip(tile)) continue;
++      if (this.player.canBuild(type, tile) === false) continue;
++      let hits = 0;
++      for (const other of cities) {
++        if (
++          this.game.euclideanDistSquared(tile, other.tile()) <=
++          radius * radius
++        ) {
++          hits += other.level();
++        }
++      }
++      for (const post of posts) {
++        if (
++          this.game.euclideanDistSquared(tile, post.tile()) <=
++          radius * radius
++        ) {
++          hits += post.level() * 0.3;
++        }
++      }
++      if (best === null || hits > best.hits) best = { tile, hits };
++    }
++    return best?.tile ?? null;
++  }
++
+   maybeSendNuke() {
+     const silos = this.player.units(UnitType.MissileSilo);
+     const config = this.game.config();
+@@ -178,6 +306,12 @@ export class NationNukeBehavior {
+       return;
+     }
+ 
++    const trainerOpponent = this.trainerOpponent();
++    if (isTrainerGame(this.game)) {
++      if (trainerOpponent !== null) this.trainerNukes(trainerOpponent, silos);
++      return;
++    }
++
+     const choice = this.chooseNukeTarget();
+     if (choice === null) {
+       return;
+diff --git a/packages/engine/src/execution/nation/NationStructureBehavior.ts b/packages/engine/src/execution/nation/NationStructureBehavior.ts
+index 36ee559f..be713811 100644
+--- a/packages/engine/src/execution/nation/NationStructureBehavior.ts
++++ b/packages/engine/src/execution/nation/NationStructureBehavior.ts
+@@ -32,6 +32,12 @@ import {
+   isSaveUpWithinReach,
+   randTerritoryTileArray,
+ } from "./NationUtils";
++import {
++  isCompactMap,
++  isTrainerGame,
++  POLICY_UNIT,
++  trainerPolicy,
++} from "./TrainerPolicy";
+ 
+ /**
+  * Configuration for how many structures of each type a nation should build
+@@ -63,6 +69,28 @@ const TEAM_PORT_RATIO = 1;
+ function getStructureRatios(
+   difficulty: Difficulty,
+   gameMode: GameMode,
++  game?: Game,
++  playerName?: string,
++): Partial<Record<UnitType, StructureRatioConfig>> {
++  const ratios = defaultStructureRatios(difficulty, gameMode);
++  // TRAINER.PRO: structures per city as built by top players.
++  const learned = game
++    ? trainerPolicy(game, playerName)?.structures?.ratioPerCity
++    : undefined;
++  if (learned) {
++    for (const [key, value] of Object.entries(learned)) {
++      const type = POLICY_UNIT[key];
++      const cfg = type === undefined ? undefined : ratios[type];
++      if (cfg && typeof value === "number" && Number.isFinite(value))
++        cfg.ratioPerCity = Math.min(3, Math.max(0, value));
++    }
++  }
++  return ratios;
++}
++
++function defaultStructureRatios(
++  difficulty: Difficulty,
++  gameMode: GameMode,
+ ): Partial<Record<UnitType, StructureRatioConfig>> {
+   const teamPorts =
+     gameMode === GameMode.Team && difficulty !== Difficulty.Easy;
+@@ -282,13 +310,71 @@ export class NationStructureBehavior {
+     this._postSaveUpStartTick = s.postSaveUpStartTick;
+   }
+ 
++  // Our name for per-player trainer policies (self-play); outside TRAINER.PRO not needed
++  private trainerName(): string | undefined {
++    return isTrainerGame(this.game) ? this.player.name() : undefined;
++  }
++
++  // TRAINER.PRO, like pros in 1v1 (Bembe): no factories and no SAMs, and on compact maps
++  // no missile silo either: that gold goes into cities.
++  private trainerSkips(type: UnitType): boolean {
++    if (!isTrainerGame(this.game)) return false;
++    return (
++      type === UnitType.Factory ||
++      type === UnitType.SAMLauncher ||
++      (type === UnitType.MissileSilo && isCompactMap(this.game))
++    );
++  }
++
++  /** A nuke of someone else's is on its way to one of our missile silos. */
++  private siloUnderNuke(): boolean {
++    const silos = this.player.units(UnitType.MissileSilo);
++    if (silos.length === 0) return false;
++    const reach = this.game
++      .config()
++      .nukeMagnitudes(UnitType.HydrogenBomb).outer;
++    return this.game
++      .units(UnitType.AtomBomb, UnitType.HydrogenBomb, UnitType.MIRVWarhead)
++      .some((nuke) => {
++        const to = nuke.targetTile();
++        return (
++          nuke.owner() !== this.player &&
++          to !== undefined &&
++          silos.some(
++            (silo) =>
++              this.game.euclideanDistSquared(silo.tile(), to) <= reach * reach,
++          )
++        );
++      });
++  }
++
++  /** TRAINER.PRO: builds a missile silo when we have none (none left after a nuke, too). */
++  buildSiloIfMissing(): boolean {
++    const type = UnitType.MissileSilo;
++    if (this.game.config().isUnitDisabled(type) || this.trainerSkips(type))
++      return false;
++    if (this.player.units(type).length > 0) return false;
++    if (
++      this.player.gold() < this.game.unitInfo(type).cost(this.game, this.player)
++    ) {
++      return false;
++    }
++    const tile = this.structureSpawnTile(type);
++    if (tile === null || this.player.canBuild(type, tile) === false)
++      return false;
++    this.game.addExecution(new ConstructionExecution(this.player, type, tile));
++    return true;
++  }
++
+   handleStructures(): boolean {
+     // Defense posts are handled outside the normal pacing/counter system:
+     // they don't increment placementsCount or lastStructureTick, and they
+     // are never built as the very first structure.
++    // TRAINER.PRO: no defense posts (strong players saw them land in random spots)
+     if (
+       this.placementsCount > 0 &&
+-      !this.game.config().isUnitDisabled(UnitType.DefensePost)
++      !this.game.config().isUnitDisabled(UnitType.DefensePost) &&
++      !isTrainerGame(this.game)
+     ) {
+       if (this.tryBuildDefensePost()) {
+         return true;
+@@ -628,6 +714,7 @@ export class NationStructureBehavior {
+     const { difficulty } = config.gameConfig();
+     if (
+       this.placementsCount === 0 &&
++      !isTrainerGame(this.game) &&
+       (difficulty === Difficulty.Hard ||
+         difficulty === Difficulty.Impossible) &&
+       !config.isUnitDisabled(UnitType.AtomBomb) &&
+@@ -649,13 +736,20 @@ export class NationStructureBehavior {
+       !citiesDisabled &&
+       !this.builtCrowdedMapFirstStructure &&
+       (this.isHighNationDensity() ||
++        // TRAINER.PRO: top players open with a port/factory instead of a city
++        ["port", "fac"].includes(
++          trainerPolicy(this.game, this.trainerName())?.structures?.first ?? "",
++        ) ||
+         (difficulty !== Difficulty.Easy && this.startsInTeamSpawnArea()))
+     ) {
+       const preferredFirst =
+         hasCoastalTiles && !config.isUnitDisabled(UnitType.Port)
+           ? UnitType.Port
+           : UnitType.Factory;
+-      if (config.isUnitDisabled(preferredFirst)) {
++      if (
++        config.isUnitDisabled(preferredFirst) ||
++        this.trainerSkips(preferredFirst)
++      ) {
+         this.builtCrowdedMapFirstStructure = true;
+       } else if (this.maybeSpawnStructure(preferredFirst)) {
+         this.builtCrowdedMapFirstStructure = true;
+@@ -663,7 +757,7 @@ export class NationStructureBehavior {
+       }
+     }
+ 
+-    if (this.maybeBuildProactiveDefensePost()) {
++    if (!isTrainerGame(this.game) && this.maybeBuildProactiveDefensePost()) {
+       return true;
+     }
+ 
+@@ -766,9 +860,14 @@ export class NationStructureBehavior {
+   ): number {
+     const gameConfig = this.game.config();
+     const { difficulty, gameMode } = gameConfig.gameConfig();
+-    const ratios = getStructureRatios(difficulty, gameMode);
++    const ratios = getStructureRatios(
++      difficulty,
++      gameMode,
++      this.game,
++      this.trainerName(),
++    );
+     const config = ratios[type];
+-    if (config === undefined) {
++    if (config === undefined || this.trainerSkips(type)) {
+       return 0;
+     }
+ 
+@@ -785,6 +884,11 @@ export class NationStructureBehavior {
+ 
+     const owned = this.player.unitsOwned(type);
+     let targetCount: number;
++    if (type === UnitType.MissileSilo && isTrainerGame(this.game)) {
++      // TRAINER.PRO (Bembe, 2026-10-13): one silo a game is enough; a second only while a
++      // nuke is flying at the one we have
++      return (this.siloUnderNuke() ? 2 : 1) - owned;
++    }
+     if (type === UnitType.MissileSilo) {
+       // First missile silo uses a higher ratio so nations can start nuking earlier
+       if (owned === 0) {
+@@ -880,7 +984,12 @@ export class NationStructureBehavior {
+     if (type === UnitType.City) {
+       increasePerOwned = CITY_PERCEIVED_COST_INCREASE_PER_OWNED;
+     } else {
+-      const ratios = getStructureRatios(difficulty, gameMode);
++      const ratios = getStructureRatios(
++        difficulty,
++        gameMode,
++        this.game,
++        this.trainerName(),
++      );
+       const config = ratios[type];
+       increasePerOwned = config?.perceivedCostIncreasePerOwned ?? 0.1;
+     }
+@@ -1143,16 +1252,25 @@ export class NationStructureBehavior {
+   }
+ 
+   private structureSpawnTile(type: UnitType): TileRef | null {
++    // TRAINER.PRO: a new city only out of reach of one atom bomb that also hits another
++    // city (Bembe); with no such spot left, maybeSpawnStructure upgrades one instead.
++    const spacedCities = type === UnitType.City && isTrainerGame(this.game);
+     const tiles =
+       type === UnitType.Port
+         ? this.randCoastalTileArray(25)
+-        : randTerritoryTileArray(this.random, this.game, this.player, 25);
++        : randTerritoryTileArray(
++            this.random,
++            this.game,
++            this.player,
++            spacedCities ? 80 : 25,
++          );
+     if (tiles.length === 0) return null;
+     const valueFunction = this.structureSpawnTileValue(type);
+     if (valueFunction === null) return null;
+     let bestTile: TileRef | null = null;
+     let bestValue = 0;
+     for (const t of tiles) {
++      if (spacedCities && !this.outOfNukeReachOfCities(t)) continue;
+       const v = valueFunction(t);
+       if (v <= bestValue && bestTile !== null) continue;
+       if (!this.player.canBuild(type, t)) continue;
+@@ -1189,6 +1307,25 @@ export class NationStructureBehavior {
+     return Array.from(this.arraySampler(tiles, numTiles));
+   }
+ 
++  // No atom bomb can hit this tile and one of our cities, ports or silos at once: they
++  // are more than twice its outer radius apart (strong players saw cities stacked).
++  private outOfNukeReachOfCities(tile: TileRef): boolean {
++    const reach =
++      2 * this.game.config().nukeMagnitudes(UnitType.AtomBomb).outer;
++    const x = this.game.x(tile);
++    const y = this.game.y(tile);
++    for (const city of this.player.units(
++      UnitType.City,
++      UnitType.Port,
++      UnitType.MissileSilo,
++    )) {
++      const dx = this.game.x(city.tile()) - x;
++      const dy = this.game.y(city.tile()) - y;
++      if (dx * dx + dy * dy <= reach * reach) return false;
++    }
++    return true;
++  }
++
+   private *arraySampler<T>(a: T[], sampleSize: number): Generator<T> {
+     if (a.length <= sampleSize) {
+       // Return all elements
+diff --git a/packages/engine/src/execution/nation/NationWarshipBehavior.ts b/packages/engine/src/execution/nation/NationWarshipBehavior.ts
+index 8180d0ba..98879a6a 100644
+--- a/packages/engine/src/execution/nation/NationWarshipBehavior.ts
++++ b/packages/engine/src/execution/nation/NationWarshipBehavior.ts
+@@ -25,6 +25,11 @@ import {
+   EMOJI_WARSHIP_RETALIATION,
+   NationEmojiBehavior,
+ } from "./NationEmojiBehavior";
++import {
++  isCompactMap,
++  isTrainerGame,
++  trainerOpponentOf,
++} from "./TrainerPolicy";
+ 
+ export class NationWarshipBehavior {
+   // Track our transport ships we currently own
+@@ -79,6 +84,7 @@ export class NationWarshipBehavior {
+     if (this.game.config().isUnitDisabled(UnitType.Warship)) {
+       return false;
+     }
++    if (isTrainerGame(this.game)) return this.trainerInterceptBoats();
+     if (!this.random.chance(50)) {
+       return false;
+     }
+@@ -130,11 +136,84 @@ export class NationWarshipBehavior {
+   }
+ 
+   trackShipsAndRetaliate(): void {
++    // TRAINER.PRO: warships don't pay off on compact maps (Bembe)
++    if (isTrainerGame(this.game) && isCompactMap(this.game)) return;
+     this.trackTransportShipsAndRetaliate();
+     this.trackTradeShipsAndRetaliate();
+     this.trackIncomingTransportsAndRetaliate();
+   }
+ 
++  // TRAINER.PRO, normal maps (Bembe): the opponent boats round us to take bots or free
++  // land behind our back -> a port near its landing (if we have none) and a warship there.
++  private trainerIntercepted: Set<Unit> = new Set();
++  private trainerInterceptBoats(): boolean {
++    if (isCompactMap(this.game)) return false;
++    const opponent = trainerOpponentOf(this.game, this.player);
++    if (opponent === null) return false;
++    for (const boat of opponent.units(UnitType.TransportShip)) {
++      if (this.trainerIntercepted.has(boat)) continue;
++      const target = boat.targetTile();
++      if (
++        target === undefined ||
++        !boat.isActive() ||
++        boat.transportShipState().isRetreating
++      ) {
++        continue;
++      }
++      const owner = this.game.owner(target);
++      if (owner.isPlayer() && owner.type() !== PlayerType.Bot) continue;
++      if (this.game.manhattanDist(boat.tile(), target) < 30) continue;
++      const shore = this.nearestShore(target, 120);
++      if (shore === null) continue; // not behind us
++      if (this.warshipsCovering(target).length > 0) {
++        this.trainerIntercepted.add(boat);
++        continue;
++      }
++      if (this.player.units(UnitType.Port).length === 0) {
++        if (
++          this.player.gold() >= this.cost(UnitType.Port) &&
++          this.player.canBuild(UnitType.Port, shore) !== false
++        ) {
++          this.game.addExecution(
++            new ConstructionExecution(this.player, UnitType.Port, shore),
++          );
++        }
++        return false; // the warship follows once the port stands
++      }
++      if (this.player.gold() < this.cost(UnitType.Warship)) return false;
++      const water = this.warshipSpawnTile(target, 30);
++      if (
++        water === null ||
++        this.player.canBuild(UnitType.Warship, water) === false
++      )
++        continue;
++      this.game.addExecution(
++        new ConstructionExecution(this.player, UnitType.Warship, water),
++      );
++      this.trainerIntercepted.add(boat);
++      return true;
++    }
++    for (const boat of this.trainerIntercepted) {
++      if (!boat.isActive()) this.trainerIntercepted.delete(boat);
++    }
++    return false;
++  }
++
++  // Our shore tile closest to `tile`, within `range`
++  private nearestShore(tile: TileRef, range: number): TileRef | null {
++    let best: TileRef | null = null;
++    let bestDist = range;
++    this.player.borderTiles().forEach((t) => {
++      if (!this.game.isShore(t)) return;
++      const d = this.game.manhattanDist(t, tile);
++      if (d <= bestDist) {
++        best = t;
++        bestDist = d;
++      }
++    });
++    return best;
++  }
++
+   // Send out a warship if our transport ship got captured
+   private trackTransportShipsAndRetaliate(): void {
+     if (this.game.config().isUnitDisabled(UnitType.TransportShip)) {
+diff --git a/packages/engine/src/execution/nation/TrainerPolicy.ts b/packages/engine/src/execution/nation/TrainerPolicy.ts
+new file mode 100644
+index 00000000..34c034e5
+--- /dev/null
++++ b/packages/engine/src/execution/nation/TrainerPolicy.ts
+@@ -0,0 +1,270 @@
++// TRAINER.PRO: what the trainer bot learned from top players' ranked 1v1 games
++// (made by teamstats.pro's bot-dataset.js, passed in GameConfig.trainerPolicy as JSON).
++// The nation keeps OpenFront's own AI machinery; these values replace its
++// hand-picked numbers: where to spawn, how much army to keep when attacking,
++// how often to act, and which structures to build per city.
++import {
++  GameMapSize,
++  PlayerType,
++  UnitType,
++} from "@openfront/engine-api/game/GameTypes";
++import { Game, Player } from "../../game/Game";
++
++export interface TrainerPolicy {
++  v: number;
++  spawns?: Record<string, [number, number][]>; // map -> normalized x, y
++  attack?: {
++    triggerRatio?: number;
++    reserveRatio?: number;
++    expandRatio?: number;
++    attackRate?: number; // ticks between decisions
++    growthRatio?: number; // troops kept at home (share of max): fastest growth near 0.42
++    punchRatio?: number; // share of troops per boat sent at the opponent
++    crushRatio?: number; // our troops / theirs from which we attack with everything
++    raidEvery?: number; // ticks between fast raids (90% in, then back); under 300 = off
++    raidTicks?: number; // how long a raid runs before the retreat
++    cutoffWeight?: number; // pull toward bots the opponent borders (-1..1); compact land wins at 0
++    breakOut?: number; // share of our land border still open (bots / free land) below which we break out
++    pressRatio?: number; // our troops / theirs needed for small attacks on the opponent
++    stackEvery?: number; // ticks between boat stacks (boats park troops off our cap); under 300 = off
++    stackRatio?: number; // share of troops per stacked boat
++    snipeTiles?: number; // a bot the opponent attacks gets sniped below this many tiles; 0 = off
++    botRamp?: number; // ticks of play per extra bot attacked at the same time (1 bot at first)
++    lookahead?: number; // weight of the bots' land that taking a bot opens up (0..2)
++    braceTicks?: number; // opponent idle this long = saving up for a strike: we keep troops home; 0 = off
++    atomGold?: number; // with this much gold, an atom bomb on their cities (nuke style); 0 = off
++    trickle?: number; // 1 = attacks on bots start at 95% and get topped up in small steps (troop saving, slower in tests); 0 = all at once
++    defend?: number; // 1 = answer attacks with the whole army, calling back attacks on bots (trainerDefend); 0 = off
++  };
++  boats?: {
++    every?: number; // ticks between boats to bots / free land, from top players
++    ratio?: number; // share of troops top players send per boat (info only: far boats carry 1%)
++  };
++  structures?: {
++    ratioPerCity?: Partial<Record<"port" | "fac" | "sam" | "silo", number>>;
++    first?: "city" | "port" | "fac";
++    siloCities?: number; // our one missile silo goes up with this many cities (Normal maps)
++  };
++  // Each map plays a bit differently (Bembe): what training found per map, over the rest
++  maps?: Record<string, Pick<TrainerPolicy, "attack" | "boats" | "structures">>;
++}
++
++// The policy with its own map's numbers on top (one copy per policy and map)
++const perMap = new WeakMap<TrainerPolicy, Map<string, TrainerPolicy>>();
++function forMap(p: TrainerPolicy, map: string): TrainerPolicy {
++  const m = p.maps?.[map];
++  if (m === undefined) return p;
++  let byMap = perMap.get(p);
++  if (byMap === undefined) perMap.set(p, (byMap = new Map()));
++  let merged = byMap.get(map);
++  if (merged === undefined) {
++    merged = {
++      ...p,
++      attack: { ...p.attack, ...m.attack },
++      boats: { ...p.boats, ...m.boats },
++      structures: {
++        ...p.structures,
++        ...m.structures,
++        ratioPerCity: {
++          ...p.structures?.ratioPerCity,
++          ...m.structures?.ratioPerCity,
++        },
++      },
++    };
++    byMap.set(map, merged);
++  }
++  return merged;
++}
++
++let cachedSource: string | undefined;
++let cached: TrainerPolicy | null = null;
++
++// Self-play training (tools/trainer-selfplay): each bot of a game gets its own policy,
++// by player name. Empty in the browser game.
++const overrides = new Map<string, TrainerPolicy>();
++export function setTrainerPolicyFor(
++  name: string,
++  policy: TrainerPolicy | null,
++) {
++  if (policy === null) overrides.delete(name);
++  else overrides.set(name, policy);
++}
++
++export function trainerPolicy(
++  game: Game,
++  playerName?: string,
++): TrainerPolicy | null {
++  const map = game.config().gameConfig().gameMap;
++  if (playerName !== undefined && overrides.has(playerName)) {
++    return forMap(overrides.get(playerName)!, map);
++  }
++  const src = game.config().gameConfig().trainerPolicy;
++  if (src === undefined || src === null || src === "") return null;
++  if (src !== cachedSource) {
++    cachedSource = src;
++    try {
++      cached = JSON.parse(src) as TrainerPolicy;
++    } catch {
++      cached = null;
++    }
++  }
++  return cached === null ? null : forMap(cached, map);
++}
++
++const clamp = (x: number | undefined, lo: number, hi: number) =>
++  typeof x === "number" && Number.isFinite(x)
++    ? Math.min(hi, Math.max(lo, x))
++    : undefined;
++
++export function learnedRatio(value: number | undefined): number | undefined {
++  return clamp(value, 0.02, 0.95);
++}
++
++export function learnedAttackRate(
++  value: number | undefined,
++): number | undefined {
++  const v = clamp(value, 15, 150);
++  return v === undefined ? undefined : Math.round(v);
++}
++
++export const POLICY_UNIT: Record<string, UnitType> = {
++  port: UnitType.Port,
++  fac: UnitType.Factory,
++  sam: UnitType.SAMLauncher,
++  silo: UnitType.MissileSilo,
++  city: UnitType.City,
++};
++
++/** True in a TRAINER.PRO game (the opponent is our bot, not a plain nation). */
++export function isTrainerGame(game: Game): boolean {
++  return game.config().gameConfig().trainerBotName !== undefined;
++}
++
++// Without learned values: a far boat every 30 s. Far boats carry 1% of the troops
++// (Bembe): they only open a beachhead, the land attack from it follows.
++const DEFAULT_BOAT_EVERY = 300;
++const FAR_BOAT_RATIO = 0.01;
++
++/** How often and how big the trainer bot's far boats are, or null outside TRAINER.PRO. */
++export function trainerBoatPlan(
++  game: Game,
++  playerName?: string,
++): { every: number; ratio: number } | null {
++  if (!isTrainerGame(game)) return null;
++  const learned = trainerPolicy(game, playerName)?.boats;
++  const every = clamp(learned?.every, 100, 1800);
++  return {
++    every: every === undefined ? DEFAULT_BOAT_EVERY : Math.round(every),
++    ratio: FAR_BOAT_RATIO,
++  };
++}
++
++/** Share of its troop cap the trainer bot keeps at home while bots are left (top players: ~30%). */
++export const TRAINER_HOME_SHARE = 0.28;
++
++/** Troops vs the opponent's from which the trainer bot, walled in with no coast, breaks through it. */
++export const TRAINER_RING_BREAK = 1.1;
++
++/** Troops vs the opponent's whole army from which the trainer bot raids; a raid also keeps half their army home. */
++export const TRAINER_RAID_EDGE = 1.6;
++
++/** Gold the trainer bot needs before it fires a hydrogen bomb at an opponent without a silo. */
++export const TRAINER_HYDRO_GOLD = 5_000_000n;
++
++/** True on a compact map: no missile silo and no warships there (Bembe), cities instead. */
++export function isCompactMap(game: Game): boolean {
++  return game.config().gameConfig().gameMapSize === GameMapSize.Compact;
++}
++
++/** The trainer bot's opponent: the human, else (self-play) the other nation. */
++export function trainerOpponentOf(game: Game, player: Player): Player | null {
++  if (!isTrainerGame(game)) return null;
++  const alive = game.players().filter((p) => p.isAlive() && p !== player);
++  return (
++    alive.find((p) => p.type() === PlayerType.Human) ??
++    alive.find((p) => p.type() === PlayerType.Nation) ??
++    null
++  );
++}
++
++// Troops grow by (10 + troops^0.73 / 4) * (1 - troops / max), fastest at
++// 0.73 / 1.73 = 42% of max: pros keep their army near there and attack with the rest,
++// in boats of about 7% each instead of along the whole border (Bembe).
++const GROWTH_RATIO = 0.42;
++const PUNCH_RATIO = 0.07;
++// With twice the opponent's troops, a big attack pays off (Bembe). Fast raids (90% in,
++// back after a few seconds: big attacks move faster) start off; training tries them.
++const CRUSH_RATIO = 2;
++const RAID_TICKS = 30;
++// Racing the opponent to the bots it borders stretched the bot thin along its border, open
++// to attacks (Kris, 2026-10-13): bots that round off our land come first now, and the
++// cut-off pull is a small learned weight.
++const CUTOFF_WEIGHT = 0;
++// Bembe walled the bot in (2026-10-13): with under 30% of its land border still on bots
++// or free land, it breaks out to those bots at once.
++const BREAK_OUT = 0.3;
++// Small attacks into a player who defends at once just burn troops (Bembe): only with 20%
++// more troops than them. Boat stacking (3 boats of 40%, then all in) starts off; training
++// tries it.
++const PRESS_RATIO = 1.2;
++const STACK_RATIO = 0.4;
++// Only the attack that takes a bot under 100 tiles gets its gold (Bembe, 2026-10-13): a
++// bot the opponent is eating gets sniped by us once it is down to 400 tiles.
++const SNIPE_TILES = 400;
++// One bot at a time for 3 minutes was too slow (Kris): one more bot every 90 s of play
++const BOT_RAMP = 900;
++// Think a step ahead when picking bots (Kris/Bembe): half the land a bot opens up counts
++const LOOKAHEAD = 0.5;
++// A player who stops attacking for 15 s is saving up for a big strike (Bembe)
++const BRACE_TICKS = 150;
++
++export interface TrainerAttackPlan {
++  growth: number;
++  punch: number;
++  crush: number;
++  raidEvery: number | null;
++  raidTicks: number;
++  cutoff: number;
++  breakOut: number;
++  press: number;
++  stackEvery: number | null;
++  stackRatio: number;
++  snipeTiles: number;
++  botRamp: number;
++  lookahead: number;
++  braceTicks: number;
++  atomGold: number;
++  defend: boolean;
++  trickle: boolean;
++}
++
++/** How the trainer bot fights the opponent, or null outside TRAINER.PRO. */
++export function trainerAttackPlan(
++  game: Game,
++  playerName?: string,
++): TrainerAttackPlan | null {
++  if (!isTrainerGame(game)) return null;
++  const learned = trainerPolicy(game, playerName)?.attack;
++  const raidEvery = clamp(learned?.raidEvery, 0, 3000) ?? 0;
++  const stackEvery = clamp(learned?.stackEvery, 0, 3000) ?? 0;
++  return {
++    growth: clamp(learned?.growthRatio, 0.2, 0.7) ?? GROWTH_RATIO,
++    punch: clamp(learned?.punchRatio, 0.02, 0.2) ?? PUNCH_RATIO,
++    crush: clamp(learned?.crushRatio, 1.2, 5) ?? CRUSH_RATIO,
++    raidEvery: raidEvery < 300 ? null : Math.round(raidEvery),
++    raidTicks: Math.round(clamp(learned?.raidTicks, 10, 100) ?? RAID_TICKS),
++    cutoff: clamp(learned?.cutoffWeight, -1, 1) ?? CUTOFF_WEIGHT,
++    breakOut: clamp(learned?.breakOut, 0.05, 0.6) ?? BREAK_OUT,
++    // never less than 20% more troops than them: training went to 0.5 against itself
++    press: clamp(learned?.pressRatio, 1.2, 3) ?? PRESS_RATIO,
++    stackEvery: stackEvery < 300 ? null : Math.round(stackEvery),
++    stackRatio: clamp(learned?.stackRatio, 0.2, 0.6) ?? STACK_RATIO,
++    snipeTiles: Math.round(clamp(learned?.snipeTiles, 0, 1000) ?? SNIPE_TILES),
++    botRamp: Math.round(clamp(learned?.botRamp, 300, 3000) ?? BOT_RAMP),
++    lookahead: clamp(learned?.lookahead, 0, 2) ?? LOOKAHEAD,
++    braceTicks: Math.round(clamp(learned?.braceTicks, 0, 600) ?? BRACE_TICKS),
++    atomGold: Math.round(clamp(learned?.atomGold, 0, 5_000_000) ?? 0),
++    defend: (learned?.defend ?? 0) >= 0.5,
++    trickle: (learned?.trickle ?? 0) >= 0.5,
++  };
++}
+diff --git a/packages/engine/src/execution/utils/AiAttackBehavior.ts b/packages/engine/src/execution/utils/AiAttackBehavior.ts
+index 2558692b..2c619692 100644
+--- a/packages/engine/src/execution/utils/AiAttackBehavior.ts
++++ b/packages/engine/src/execution/utils/AiAttackBehavior.ts
+@@ -39,6 +39,7 @@ import type {
+   SnapshotWriter,
+ } from "../../snapshot/SnapshotContext";
+ import { AttackExecution } from "../AttackExecution";
++import { BoatRetreatExecution } from "../BoatRetreatExecution";
+ import { DonateTroopsExecution } from "../DonateTroopExecution";
+ import { planBotAttacks, walledInBots } from "../nation/BotAnnexation";
+ import { NationAllianceBehavior } from "../nation/NationAllianceBehavior";
+@@ -55,6 +56,16 @@ import {
+   hasHighStartingGold,
+ } from "../nation/NationUtils";
+ import type { NationWarshipBehavior } from "../nation/NationWarshipBehavior";
++import {
++  TRAINER_HOME_SHARE,
++  TRAINER_RAID_EDGE,
++  TRAINER_RING_BREAK,
++  type TrainerAttackPlan,
++  trainerAttackPlan,
++  trainerBoatPlan,
++  trainerOpponentOf,
++} from "../nation/TrainerPolicy";
++import { RetreatExecution } from "../RetreatExecution";
+ import { TransportShipExecution } from "../TransportShipExecution";
+ import { closestTwoTiles } from "../Util";
+ 
+@@ -78,6 +89,14 @@ function boxGap(a: Box, b: Box): number {
+   return dx + dy;
+ }
+ 
++// TRAINER.PRO defense (trainerDefend): home share kept when answering an attack, and the
++// incoming share of our army from which our attacks on bots are called back.
++const TRAINER_DEFEND_KEEP = 0.05;
++// Share of our land border still on bots or free land below which an inland bot is about to be
++// walled in and annexed (trainerBreakOut)
++const TRAINER_RING_LAST = 0.35;
++const TRAINER_RECALL_SHARE = 0.5;
++
+ export class AiAttackBehavior {
+   private botAttackTroopsSent: number = 0;
+   // Our boat attacks (landed beachheads) already followed up by land, while they last
+@@ -139,6 +158,8 @@ export class AiAttackBehavior {
+   }
+ 
+   maybeAttack() {
++    this.maybeFarBoat();
++    this.maybeBehindBoat();
+     const routes = new Map<Player, BoatRoute | null>();
+     this.boatRoutes = routes;
+     let landFront = false;
+@@ -154,6 +175,149 @@ export class AiAttackBehavior {
+     this.clearBlockedLane(routes, landFront);
+   }
+ 
++  // TRAINER.PRO: like top players, boat far across the map now and then to take bots
++  // (or free land) there. Not snapshotted: after a restore the next boat just comes sooner.
++  private lastFarBoat = -Infinity;
++  private maybeFarBoat(): void {
++    const plan = trainerBoatPlan(this.game, this.player.name());
++    if (plan === null || this.player.type() !== PlayerType.Nation) return;
++    const now = this.game.ticks();
++    // Walled off from bots and free land: boat out three times as often
++    const every = this.isCutOff() ? Math.round(plan.every / 3) : plan.every;
++    if (now - this.lastFarBoat < every) return;
++    if (
++      this.game.config().isUnitDisabled(UnitType.TransportShip) ||
++      this.player.unitCount(UnitType.TransportShip) >=
++        this.game.config().boatMaxNumber() ||
++      this.findIncomingAttackPlayer() !== null
++    ) {
++      return;
++    }
++    const troops = Math.max(1, Math.floor(this.player.troops() * plan.ratio));
++    this.lastFarBoat = now; // also when nothing is found: try again next period
++    let best: { tile: TileRef; launch: TileRef; dist: number } | null = null;
++    let checked = 0;
++    for (let i = 0; i < 300 && checked < 12; i++) {
++      const x = this.random.nextInt(0, this.game.width());
++      const y = this.random.nextInt(0, this.game.height());
++      if (!this.game.isValidCoord(x, y)) continue;
++      const tile = this.game.ref(x, y);
++      if (!this.game.isLand(tile) || this.game.isImpassable(tile)) continue;
++      const owner = this.game.owner(tile);
++      if (owner === this.player) continue;
++      if (owner.isPlayer() && owner.type() !== PlayerType.Bot) continue;
++      checked++;
++      const launch = canBuildTransportShip(this.game, this.player, tile);
++      if (launch === false) continue;
++      const dist = this.game.manhattanDist(launch, tile);
++      if (best === null || dist > best.dist) best = { tile, launch, dist };
++    }
++    if (best === null || this.sail(best.launch, best.tile).blocker !== null) {
++      return;
++    }
++    this.game.addExecution(
++      new TransportShipExecution(this.player, best.tile, troops),
++    );
++  }
++
++  // TRAINER.PRO (Bembe, 2026-10-14): top players send a boat far behind the enemy's lines
++  // the moment they first touch them, to take the bots there before the enemy gets to them.
++  // 1% of our troops; the beachhead then takes the bot it landed on (followUpLandings).
++  // Not snapshotted, like far boats.
++  private behindBoat: { exec: TransportShipExecution; tile: TileRef } | null =
++    null;
++  private lastBehindBoat = -Infinity;
++  private maybeBehindBoat(): void {
++    if (
++      trainerBoatPlan(this.game, this.player.name()) === null ||
++      this.player.type() !== PlayerType.Nation
++    ) {
++      return;
++    }
++    const opponent = trainerOpponentOf(this.game, this.player);
++    if (opponent === null || !this.player.sharesBorderWith(opponent)) return;
++    // Top players keep sending them, one every 15-30 s (Nvr_Kn: 2:29, 3:24, 3:36, 3:46,
++    // 3:58, 4:27, ...), one at sea at a time
++    if (this.behindBoat?.exec.isActive()) return;
++    const now = this.game.ticks();
++    if (now - this.lastBehindBoat < 200) return;
++    if (
++      this.game.config().isUnitDisabled(UnitType.TransportShip) ||
++      this.player.unitCount(UnitType.TransportShip) >=
++        this.game.config().boatMaxNumber()
++    ) {
++      return;
++    }
++    const ours = this.player.spawnTile();
++    const theirs = opponent.spawnTile();
++    if (ours === undefined || theirs === undefined) return;
++    this.lastBehindBoat = now; // also when nothing is found: try again later
++    // Their side of the map: a bot's coast nearer their spawn than ours (inland bots
++    // can't be boated to), the farther behind them the better
++    let best: { tile: TileRef; score: number } | null = null;
++    let tried = 0;
++    const all = this.game.players();
++    const from = this.random.nextInt(0, Math.max(1, all.length));
++    for (let i = 0; i < all.length && tried < 25; i++) {
++      const bot = all[(from + i) % all.length];
++      if (bot.type() !== PlayerType.Bot || !bot.isAlive()) continue;
++      const home = bot.spawnTile();
++      if (home === undefined) continue;
++      if (
++        this.game.manhattanDist(theirs, home) >=
++        this.game.manhattanDist(ours, home)
++      ) {
++        continue;
++      }
++      tried++;
++      const coast = targetTransportTile(this.game, this.player, home);
++      if (coast === null) continue;
++      const score =
++        this.game.manhattanDist(ours, coast) -
++        this.game.manhattanDist(theirs, coast);
++      if (score <= 0 || (best !== null && score <= best.score)) continue;
++      if (canBuildTransportShip(this.game, this.player, coast) === false) {
++        continue;
++      }
++      best = { tile: coast, score };
++    }
++    if (best === null) return;
++    const exec = new TransportShipExecution(
++      this.player,
++      best.tile,
++      Math.max(1, Math.floor(this.player.troops() / 100)),
++    );
++    this.game.addExecution(exec);
++    this.behindBoat = { exec, tile: best.tile };
++  }
++
++  // TRAINER.PRO (Bembe, 2026-10-14): when our hydrogen bomb lands on the opponent and kills
++  // their troops there, attack them right away with nearly everything. Not snapshotted.
++  private hydros = new Map<Unit, TileRef>();
++  private trainerHydroFollowUp(opponent: Player): boolean {
++    for (const u of this.player.units(UnitType.HydrogenBomb)) {
++      const target = u.targetTile();
++      if (target !== undefined && !this.hydros.has(u))
++        this.hydros.set(u, target);
++    }
++    let landed = false;
++    for (const [u, tile] of this.hydros) {
++      if (u.isActive()) continue;
++      this.hydros.delete(u);
++      // Shot down by a SAM: no fallout where it was going
++      if (this.game.hasFallout(tile)) landed = true;
++    }
++    if (!landed || !this.bordersByLand(opponent)) return false;
++    const keep =
++      this.game.config().maxTroops(this.player) * this.expandRatio * 0.5;
++    const troops = Math.floor(this.player.troops() - keep);
++    if (troops <= 0) return false;
++    this.game.addExecution(
++      new AttackExecution(troops, this.player, opponent.id()),
++    );
++    return true;
++  }
++
+   // Called every tick. Hard & Impossible boats are beachheads: the moment one lands
+   // (its attack starts at the landing tile), attack its target by land from there, once.
+   // If someone else holds that coast by now, the tile just stays for later attacks.
+@@ -168,6 +332,14 @@ export class AiAttackBehavior {
+       if (landing === null || this.followedLandings.includes(attack)) continue;
+       this.followedLandings.push(attack);
+       const target = attack.target();
++      // TRAINER.PRO: a punch at the opponent stays a punch, no follow-up along the border
++      if (
++        target.isPlayer() &&
++        target.type() !== PlayerType.Bot &&
++        trainerAttackPlan(this.game, this.player.name()) !== null
++      ) {
++        continue;
++      }
+       if (!this.holdsLandNextTo(target, landing)) continue;
+       this.sendLandAttack(
+         target,
+@@ -237,6 +409,19 @@ export class AiAttackBehavior {
+     const hasNonNukedTerraNullius =
+       borderHasNonNukedTerraNullius ||
+       playerNeighbors.some((n) => !n.isPlayer());
++
++    const trainer =
++      this.player.type() === PlayerType.Nation
++        ? trainerAttackPlan(this.game, this.player.name())
++        : null;
++    if (trainer !== null) {
++      this.trainerChooseAttack(
++        borderingEnemies,
++        hasNonNukedTerraNullius,
++        trainer,
++      );
++      return;
++    }
+     if (hasNonNukedTerraNullius) {
+       if (this.sendAttack(this.game.terraNullius())) return;
+     }
+@@ -258,6 +443,517 @@ export class AiAttackBehavior {
+     this.attackBestTarget(borderingFriends, borderingEnemies);
+   }
+ 
++  // TRAINER.PRO, like pros in 1v1 (Bembe): answer attacks, then take free land and bots
++  // first (those near the opponent first, to cut it off from them). The opponent only gets
++  // the troops above the fastest-growth level, in small boats at its coast instead of
++  // along the whole border; when we are walled off, boats land next to bots behind it.
++  private trainerChooseAttack(
++    enemies: Player[],
++    freeLand: boolean,
++    plan: TrainerAttackPlan,
++  ): void {
++    if (this.retaliate()) return;
++    this.annexWalledInBots();
++    const opponent =
++      enemies.find((e) => e.type() !== PlayerType.Bot) ??
++      trainerOpponentOf(this.game, this.player);
++    if (opponent !== null && this.trainerHydroFollowUp(opponent)) return;
++    if (opponent !== null && this.trainerSnipe(opponent, plan)) return;
++    if (opponent !== null && this.trainerBreakOut(opponent, plan)) return;
++    if (opponent !== null && this.trainerBrace(opponent, plan)) {
++      // Troops stay home, but top players never stop eating bots: what is above ~45% of
++      // the cap still goes into bots
++      const share =
++        this.player.troops() / this.game.config().maxTroops(this.player);
++      if (share > TRAINER_HOME_SHARE + 0.13) this.attackBots();
++      return;
++    }
++    if (freeLand && this.sendAttack(this.game.terraNullius())) return;
++    // Far stronger: hit it with (nearly) everything, even with bots left (the bots used
++    // to come first and the crush never fired: in mztdxHKv we sat on 2.6x their army)
++    if (
++      opponent !== null &&
++      this.game.ticks() - this.game.config().numSpawnPhaseTurns() > 900 &&
++      this.bordersByLand(opponent) &&
++      this.player.troops() >= opponent.troops() * plan.crush &&
++      !this.player.outgoingAttacks().some((a) => a.target() === opponent)
++    ) {
++      const keep = this.game.config().maxTroops(this.player) * this.expandRatio;
++      const troops = Math.floor(this.player.troops() - keep);
++      if (troops > 0) {
++        this.game.addExecution(
++          new AttackExecution(troops, this.player, opponent.id()),
++        );
++        return;
++      }
++    }
++    if (this.attackBots()) return;
++    if (opponent === null) return;
++    // Bots first, always (Bembe and DougyJr, 2026-10-14): self-play taught the bot to poke
++    // the opponent while bots were left, which works against itself but just feeds a
++    // human. While we still border a bot, only the crush above touches the opponent.
++    if (this.neighboringBots().length > 0) return;
++    if (this.trainerStack(opponent, plan)) return;
++    if (this.trainerRaid(opponent, plan)) return;
++    const max = this.game.config().maxTroops(this.player);
++    const spare = this.player.troops() - max * plan.growth;
++    if (spare < max * 0.02) return;
++    // Small attacks into a player who defends at once only burn our troops (Bembe,
++    // 2026-10-13): press only with more troops than them, or while they are busy
++    // attacking someone else with a big part of their army
++    const busy =
++      opponent.outgoingAttacks().reduce((sum, a) => sum + a.troops(), 0) >=
++      opponent.troops() * 0.3;
++    // The troop cap decides 1v1s (Bembe, 2026-10-13): take bots and land first, and
++    // press the player only once our cap is at least theirs
++    const capped = max < this.game.config().maxTroops(opponent);
++    if (
++      (this.player.troops() < opponent.troops() * plan.press || capped) &&
++      !busy
++    ) {
++      return;
++    }
++    // Defense posts make a land attack along the whole border expensive: land a short
++    // hop away instead, so the boat is there before they can answer
++    const posts = opponent.units(UnitType.DefensePost).length > 0;
++    if (
++      this.trainerPunches(
++        opponent,
++        spare,
++        posts ? Math.max(plan.punch, 0.15) : plan.punch,
++        !freeLand,
++        posts ? "short" : "any",
++      )
++    ) {
++      return;
++    }
++    if (this.bordersByLand(opponent)) {
++      this.game.addExecution(
++        new AttackExecution(Math.floor(spare), this.player, opponent.id()),
++      );
++    }
++  }
++
++  // Gold sniping (Bembe, 2026-10-13): only the attack that takes a bot under 100 tiles gets
++  // all its gold. When the opponent is eating a bot next to us and it is down to
++  // snipeTiles, we jump in with one strong attack (big attacks take tiles faster) to grab
++  // the last ones first.
++  private trainerSnipe(opponent: Player, plan: TrainerAttackPlan): boolean {
++    if (plan.snipeTiles <= 0) return false;
++    const max = this.game.config().maxTroops(this.player);
++    let sent = false;
++    for (const attack of opponent.outgoingAttacks()) {
++      const bot = attack.target();
++      if (!bot.isPlayer() || bot.type() !== PlayerType.Bot) continue;
++      if (bot.numTilesOwned() > plan.snipeTiles || bot.gold() <= 0n) continue;
++      if (!this.player.sharesBorderWith(bot)) continue;
++      if (this.player.outgoingAttacks().some((a) => a.target() === bot)) {
++        continue;
++      }
++      // At least as strong as their attack, and well above what the bot still has
++      const want = Math.max(attack.troops(), bot.troops() * 3, max * 0.05);
++      const troops = Math.floor(
++        Math.min(want, this.player.troops() - max * this.reserveRatio),
++      );
++      if (troops < bot.troops() * 1.5 + 1) continue;
++      this.game.addExecution(
++        new AttackExecution(troops, this.player, bot.id()),
++      );
++      sent = true;
++    }
++    return sent;
++  }
++
++  // Bracing (Bembe, 2026-10-13): a strong player who stops attacking for braceTicks is
++  // saving up for one big strike at us (0.7-3M troops in his and Kris's wins). Then we
++  // start nothing new and keep our army home, until it matches theirs.
++  private oppLastActive = 0;
++  private trainerBrace(opponent: Player, plan: TrainerAttackPlan): boolean {
++    const now = this.game.ticks();
++    if (
++      opponent.outgoingAttacks().length > 0 ||
++      opponent.units(UnitType.TransportShip).length > 0
++    ) {
++      this.oppLastActive = now;
++      return false;
++    }
++    if (plan.braceTicks <= 0 || now - this.oppLastActive < plan.braceTicks) {
++      return false;
++    }
++    if (!this.bordersByLand(opponent)) return false;
++    return this.player.troops() < opponent.troops();
++  }
++
++  // Being walled in (Bembe, 2026-10-13): when the opponent holds most of our land border
++  // and only a little still touches bots / free land, break through to the bots that are
++  // left right away, with everything above the reserve. Fully walled in = annexed.
++  private lastRingBreak = -Infinity;
++  private borderMix: {
++    tick: number;
++    open: number;
++    bots: Map<Player, number>;
++    shore: boolean;
++  } | null = null;
++  private trainerBreakOut(opponent: Player, plan: TrainerAttackPlan): boolean {
++    const now = this.game.ticks();
++    if (this.borderMix === null || now - this.borderMix.tick >= 30) {
++      this.borderMix = { tick: now, ...this.measureBorder(opponent) };
++    }
++    const { open, bots, shore } = this.borderMix;
++    if (open >= plan.breakOut) return false;
++    const max = this.game.config().maxTroops(this.player);
++    // Inland and walled in (Jr_Bambi's win mztdxHKv, 2026-10-15): eating the bots that are
++    // left only closes the ring, and once the opponent is our only neighbour the engine
++    // hands it all our land and troops (we lost 1.3M troops that way, twice their army).
++    // Without a coast of our own, break through the opponent while we can.
++    // Nearly closed (Bembe's win 4ui2Nwwo, 2026-11-01: 98% of our border on him, then the
++    // last bot fell and we were annexed with 1M troops): annexation costs everything, so we
++    // break through then whatever their army, and a small attack already on them no longer
++    // blocks it (a 3k poke did there).
++    // One such strike per 30 s: thrown again at every decision it kept the army at 5% while
++    // theirs grew 10x (ghost of 4ui2Nwwo)
++    const closing = open < TRAINER_RING_LAST;
++    const trapped = closing && now - this.lastRingBreak >= 300;
++    if (
++      !shore &&
++      this.bordersByLand(opponent) &&
++      (trapped ||
++        this.player.troops() >= opponent.troops() * TRAINER_RING_BREAK)
++    ) {
++      const keep = trapped ? TRAINER_DEFEND_KEEP : this.expandRatio;
++      const troops = Math.floor(this.player.troops() - max * keep);
++      const sending = this.player
++        .outgoingAttacks()
++        .filter((a) => a.target() === opponent)
++        .reduce((sum, a) => sum + a.troops(), 0);
++      if (troops > 0 && sending < troops * 0.5) {
++        if (trapped) this.lastRingBreak = now;
++        this.game.addExecution(
++          new AttackExecution(troops, this.player, opponent.id()),
++        );
++        return true;
++      }
++    }
++    // Eating the last bots around us only closes the ring
++    if (bots.size === 0 || (closing && !shore)) return false;
++    const targets = [...bots.entries()]
++      .filter(([b]) => b.isAlive())
++      .sort((a, b) => b[1] - a[1])
++      .slice(0, 2)
++      .map(([b]) => b);
++    let sent = false;
++    for (const bot of targets) {
++      if (this.player.outgoingAttacks().some((a) => a.target() === bot)) {
++        continue;
++      }
++      const troops = Math.floor(
++        (this.player.troops() - max * this.reserveRatio) / targets.length,
++      );
++      if (troops < bot.troops() + 1) continue;
++      this.game.addExecution(
++        new AttackExecution(troops, this.player, bot.id()),
++      );
++      sent = true;
++    }
++    return sent;
++  }
++
++  /**
++   * Our land border: the share of border tiles that touch a bot or free land rather
++   * than the opponent (1 when the opponent isn't a neighbour), and per bot how many.
++   */
++  private measureBorder(opponent: Player): {
++    open: number;
++    bots: Map<Player, number>;
++    shore: boolean;
++  } {
++    const map = this.game.map();
++    const nbuf = this.nbuf;
++    const bots = new Map<Player, number>();
++    let open = 0;
++    let shut = 0;
++    let shore = false;
++    for (const t of this.player.borderTiles()) {
++      if (map.isOceanShore(t)) shore = true;
++      const n = map.neighbors4(t, nbuf);
++      let toOpen = false;
++      let toOpponent = false;
++      for (let i = 0; i < n; i++) {
++        const nb = nbuf[i];
++        if (!map.isLand(nb) || map.isImpassable(nb)) continue;
++        if (!map.hasOwner(nb)) {
++          toOpen = true;
++          continue;
++        }
++        const owner = this.game.owner(nb);
++        if (owner === this.player || !owner.isPlayer()) continue;
++        if (owner === opponent) toOpponent = true;
++        else if (owner.type() === PlayerType.Bot) {
++          toOpen = true;
++          bots.set(owner, (bots.get(owner) ?? 0) + 1);
++        }
++      }
++      if (toOpen) open++;
++      else if (toOpponent) shut++;
++    }
++    return {
++      open: open + shut === 0 ? 1 : open / (open + shut),
++      bots,
++      shore,
++    };
++  }
++
++  // Boat stacking (Bembe, 2026-10-13): troops on boats don't count against our troop cap,
++  // so near the cap we send up to 3 boats of `stack.ratio` of our troops on a long trip at
++  // the opponent and let the army at home grow back each time. Then we attack them with
++  // nearly everything and turn the boats around: they bring their troops home (minus the
++  // 25% a retreat costs), so we are not left empty. Not snapshotted, like the raids.
++  private stack: { boats: number[]; since: number } | null = null;
++  private lastStack = -Infinity;
++  private trainerStack(opponent: Player, plan: TrainerAttackPlan): boolean {
++    if (plan.stackEvery === null) return false;
++    const now = this.game.ticks();
++    const max = this.game.config().maxTroops(this.player);
++    if (this.stack !== null && this.stack.boats.length === 0) {
++      // The first boat never got on the water (no route): give up this time
++      if (now - this.stack.since > 30) {
++        this.stack = null;
++        this.pendingStack = null;
++        this.lastStack = now;
++        return false;
++      }
++      return true;
++    }
++    if (this.stack !== null) {
++      const boats = this.player
++        .units(UnitType.TransportShip)
++        .filter(
++          (u) =>
++            this.stack!.boats.includes(u.id()) &&
++            !u.transportShipState().isRetreating,
++        );
++      const landing = boats.some((u) => {
++        const to = u.targetTile();
++        return to !== undefined && this.game.manhattanDist(u.tile(), to) < 25;
++      });
++      const full = this.stack.boats.length >= 3;
++      if (
++        boats.length === 0 ||
++        landing ||
++        (full && this.player.troops() >= max * 0.8) ||
++        now - this.stack.since > 900 ||
++        this.findIncomingAttackPlayer() !== null
++      ) {
++        // Release: everything at them, the boats home
++        const keep = max * this.expandRatio;
++        const troops = Math.floor(this.player.troops() - keep);
++        if (troops > 0 && this.bordersByLand(opponent)) {
++          this.game.addExecution(
++            new AttackExecution(troops, this.player, opponent.id()),
++          );
++        }
++        for (const u of boats) {
++          this.game.addExecution(new BoatRetreatExecution(this.player, u.id()));
++        }
++        this.stack = null;
++        this.lastStack = now;
++        return true;
++      }
++      if (!full && this.player.troops() >= max * 0.8) {
++        this.sendStackBoat(opponent, plan.stackRatio);
++      }
++      return true;
++    }
++    if (
++      now - this.lastStack < plan.stackEvery ||
++      this.player.troops() < max * 0.8 ||
++      !this.bordersByLand(opponent) ||
++      this.findIncomingAttackPlayer() !== null ||
++      this.game.config().boatMaxNumber() -
++        this.player.unitCount(UnitType.TransportShip) <
++        3
++    ) {
++      return false;
++    }
++    this.stack = { boats: [], since: now };
++    if (!this.sendStackBoat(opponent, plan.stackRatio)) {
++      this.stack = null;
++      this.lastStack = now;
++      return false;
++    }
++    return true;
++  }
++
++  private sendStackBoat(opponent: Player, ratio: number): boolean {
++    if (this.stack === null) return false;
++    const landing = this.trainerPunchTile(opponent, false, "long");
++    if (landing === null) return false;
++    const before = new Set(
++      this.player.units(UnitType.TransportShip).map((u) => u.id()),
++    );
++    const exec = new TransportShipExecution(
++      this.player,
++      landing,
++      Math.floor(this.player.troops() * ratio),
++    );
++    this.game.addExecution(exec);
++    this.pendingStack = before;
++    return true;
++  }
++
++  // The boat id is known a tick after the execution starts: picked up then
++  private pendingStack: Set<number> | null = null;
++  /** Called every tick: notes the id of a stacked boat once it is on the water. */
++  noteStackBoats(): void {
++    if (this.pendingStack === null || this.stack === null) return;
++    for (const u of this.player.units(UnitType.TransportShip)) {
++      if (
++        !this.pendingStack.has(u.id()) &&
++        !this.stack.boats.includes(u.id())
++      ) {
++        this.stack.boats.push(u.id());
++        this.pendingStack = null;
++        return;
++      }
++    }
++  }
++
++  // A fast raid: 90% of our troops in along the border (big attacks move faster), pulled
++  // back raidTicks later by endTrainerRaid. Not snapshotted, like the far boats.
++  private lastRaid = -Infinity;
++  private raid: { target: Player; until: number } | null = null;
++  private trainerRaid(opponent: Player, plan: TrainerAttackPlan): boolean {
++    if (plan.raidEvery === null || this.raid !== null) return false;
++    const now = this.game.ticks();
++    if (now - this.lastRaid < plan.raidEvery) return false;
++    if (
++      !this.bordersByLand(opponent) ||
++      this.findIncomingAttackPlayer() !== null
++    )
++      return false;
++    const max = this.game.config().maxTroops(this.player);
++    if (this.player.troops() < max * plan.growth) return false;
++    // A human answers a raid with an attack of his own, which cancels ours troop for troop,
++    // then strikes our empty land (oJigeZzD: 2.0M raid into 1.4M + 0.6M out at bots, his
++    // 1.5M counter left 133k of it, his 1.3M strike took 34k tiles). Raid only well above
++    // his whole army, troops out at bots included, and keep half of it home.
++    const army =
++      opponent.troops() +
++      opponent.outgoingAttacks().reduce((sum, a) => sum + a.troops(), 0);
++    if (this.player.troops() < army * TRAINER_RAID_EDGE) return false;
++    const troops = Math.floor(
++      Math.min(this.player.troops() * 0.9, this.player.troops() - army * 0.5),
++    );
++    this.lastRaid = now;
++    this.raid = { target: opponent, until: now + plan.raidTicks };
++    this.game.addExecution(
++      new AttackExecution(troops, this.player, opponent.id()),
++    );
++    return true;
++  }
++
++  /** Called every tick: pulls a raid back once its time is up. */
++  endTrainerRaid(): void {
++    if (this.raid === null || this.game.ticks() < this.raid.until) return;
++    for (const attack of this.player.outgoingAttacks()) {
++      if (
++        attack.target() === this.raid.target &&
++        attack.sourceTile() === null &&
++        !attack.retreating()
++      ) {
++        this.game.addExecution(new RetreatExecution(this.player, attack.id()));
++      }
++    }
++    this.raid = null;
++  }
++
++  // Boats of `punch` of our troops at the opponent's coast, while `spare` lasts (max 3 now)
++  private trainerPunches(
++    opponent: Player,
++    spare: number,
++    punch: number,
++    walledOff: boolean,
++    prefer: "short" | "long" | "any" = "any",
++  ): boolean {
++    if (this.game.config().isUnitDisabled(UnitType.TransportShip)) return false;
++    const per = Math.max(1, Math.floor(this.player.troops() * punch));
++    let free =
++      this.game.config().boatMaxNumber() -
++      this.player.unitCount(UnitType.TransportShip);
++    let budget = spare;
++    let sent = 0;
++    while (sent < 3 && free > 0 && budget >= per) {
++      const landing = this.trainerPunchTile(opponent, walledOff, prefer);
++      if (landing === null) break;
++      this.game.addExecution(
++        new TransportShipExecution(this.player, landing, per),
++      );
++      budget -= per;
++      free--;
++      sent++;
++    }
++    return sent > 0;
++  }
++
++  // A coast tile of the opponent we can boat to safely. Walled off: one next to a bot or
++  // free land if any, so the landing breaks through to them. "short": the shortest trip of
++  // those sampled (lands before they can react, Bembe 2026-10-13); "long": the longest
++  // (stacked boats stay out of the troop cap for longer).
++  private trainerPunchTile(
++    opponent: Player,
++    walledOff: boolean,
++    prefer: "short" | "long" | "any" = "any",
++  ): TileRef | null {
++    const shore: TileRef[] = [];
++    opponent.borderTiles().forEach((t) => {
++      if (this.game.isShore(t)) shore.push(t);
++    });
++    if (shore.length === 0) return null;
++    let best: TileRef | null = null;
++    let bestScore = -Infinity;
++    for (let i = 0; i < 16; i++) {
++      const tile = this.random.randElement(shore);
++      const launch = canBuildTransportShip(this.game, this.player, tile);
++      if (launch === false || this.sail(launch, tile).blocker !== null) {
++        continue;
++      }
++      const near = !walledOff || this.nearBotOrFreeLand(tile);
++      if (prefer === "any" && near) return tile;
++      const dist = this.game.manhattanDist(launch, tile);
++      const score =
++        (near ? 1e6 : 0) +
++        (prefer === "short" ? -dist : prefer === "long" ? dist : 0);
++      if (score > bestScore) {
++        bestScore = score;
++        best = tile;
++      }
++    }
++    return best;
++  }
++
++  private nearBotOrFreeLand(tile: TileRef): boolean {
++    const x = this.game.x(tile);
++    const y = this.game.y(tile);
++    for (let dx = -8; dx <= 8; dx += 4) {
++      for (let dy = -8; dy <= 8; dy += 4) {
++        if (!this.game.isValidCoord(x + dx, y + dy)) continue;
++        const t = this.game.ref(x + dx, y + dy);
++        if (!this.game.isLand(t) || this.game.isImpassable(t)) continue;
++        const owner = this.game.owner(t);
++        if (!owner.isPlayer() || owner.type() === PlayerType.Bot) return true;
++      }
++    }
++    return false;
++  }
++
++  // No bot and no free land next to us by land
++  private isCutOff(): boolean {
++    return (
++      this.neighboringBots().length === 0 &&
++      !this.hasLandBorderWithTerraNullius()
++    );
++  }
++
+   private attackWithRandomBoat(borderingEnemies: Player[] = []) {
+     if (this.player === null) throw new Error("not initialized");
+ 
+@@ -722,6 +1418,12 @@ export class AiAttackBehavior {
+     for (const attack of this.player.outgoingAttacks()) {
+       if (attack.target() === attacker) pressing += attack.troops();
+     }
++    if (
++      this.player.type() === PlayerType.Nation &&
++      trainerAttackPlan(this.game, this.player.name())?.defend === true
++    ) {
++      return this.trainerDefend(attacker, incoming, pressing);
++    }
+     const troops = this.player.troops();
+     const maxTroops = this.game.config().maxTroops(this.player);
+     const spare = Math.min(
+@@ -737,6 +1439,43 @@ export class AiAttackBehavior {
+     return this.sendLandAttack(attacker, () => send, attacker);
+   }
+ 
++  // TRAINER.PRO (27 replays of games humans won, 2026-11-01): humans throw nearly their
++  // whole army at the bot, often with less than the bot has at home, and leave their own
++  // land empty. Our reserve ratio (63% of the cap on Australia, more than the bot ever
++  // has) let the bot answer with a few % and it fell within a minute. Now like a player:
++  // with a big attack coming our attacks on bots come home, our army cancels theirs, and
++  // when we have more than that plus their home army, everything goes into their land.
++  private trainerDefend(
++    attacker: Player,
++    incoming: number,
++    pressing: number,
++  ): boolean {
++    const need = incoming - pressing;
++    if (need <= 0) return false;
++    const troops = this.player.troops();
++    if (incoming >= troops * TRAINER_RECALL_SHARE) {
++      for (const attack of this.player.outgoingAttacks()) {
++        const target = attack.target();
++        if (
++          target.isPlayer() &&
++          target.type() === PlayerType.Bot &&
++          !attack.retreating()
++        ) {
++          attack.orderRetreat();
++        }
++      }
++    }
++    const max = this.game.config().maxTroops(this.player);
++    const spare = troops - max * TRAINER_DEFEND_KEEP;
++    if (spare < 1) return false;
++    const send =
++      spare >= need + attacker.troops() ? spare : Math.min(spare, need * 1.1);
++    this.game.addExecution(
++      new AttackExecution(Math.floor(send), this.player, attacker.id()),
++    );
++    return true;
++  }
++
+   /** Troops a strike on target could send now: above the reserve, and within troopSendCap without target. */
+   strikeTroops(target: Player): number {
+     const maxTroops = this.game.config().maxTroops(this.player);
+@@ -792,6 +1531,9 @@ export class AiAttackBehavior {
+   // Hard & Impossible order them to wall in other bots instead (see planBotAttacks)
+   private attackBots(): boolean {
+     const bots = this.neighboringBots();
++    // TRAINER.PRO: a tribe that took a city used to be left alone until we had rebuilt one
++    // cheaper; tribes now tear a taken city down within ~10 s (Bembe lost his opponent's
++    // city that way, 2026-11-01), so it is taken back at once (ranked first below).
+     if (bots.length === 0) {
+       return false;
+     }
+@@ -800,16 +1542,61 @@ export class AiAttackBehavior {
+ 
+     let ordered: Player[];
+     if (this.annexesBots()) {
+-      ordered = planBotAttacks(this.game, this.player, bots);
++      ordered = planBotAttacks(
++        this.game,
++        this.player,
++        bots,
++        trainerAttackPlan(this.game, this.player.name())?.lookahead ?? 0,
++      );
+     } else {
+       const density = (p: Player) => p.troops() / p.numTilesOwned();
+       ordered = bots.slice().sort((a, b) => density(a) - density(b));
+     }
+     const ownsStructures = (p: Player) =>
+       p.units().some((u) => Structures.has(u.type()));
+-    const sortedBots = ordered.sort(
+-      (a, b) => Number(ownsStructures(b)) - Number(ownsStructures(a)),
+-    );
++    // TRAINER.PRO: bots we already wrap around (half their border or more) come first, so
++    // our land stays round and the border with the opponent short; the pull toward bots it
++    // borders is learned. Within a group the order above stays (most land per troop first):
++    // ranking by the exact wrap share put a big cheap bot we only touch, like one reached
++    // by boat, last for good (Bembe, 2026-10-13).
++    const opponent = trainerOpponentOf(this.game, this.player);
++    const plan = trainerAttackPlan(this.game, this.player.name());
++    // Inland (no coast of our own): bots on the coast or the map edge come first, a way out the
++    // opponent can't wall shut (Bembe's win 4ui2Nwwo, 2026-11-01: a centre spawn got ringed and
++    // annexed at 3:07 with 1M troops)
++    const map = this.game.map();
++    const inland =
++      plan !== null && this.borderMix !== null && !this.borderMix.shore;
++    const outward = (p: Player) => {
++      let out = false;
++      p.borderTiles().forEach((t) => {
++        if (!out && (map.isOceanShore(t) || map.isOnEdgeOfMap(t))) out = true;
++      });
++      return out;
++    };
++    // Being ringed (Bembe, 2026-11-01: "the bot grew instead of cutting me off"): once the
++    // opponent holds 40% of an inland bot's border, the bots it borders come first, so its
++    // ring stays open and it is the one cut off from bots
++    const ringing = inland && this.borderMix!.open < 0.6;
++    const ranks = new Map<Player, number>();
++    for (const p of ordered) {
++      ranks.set(
++        p,
++        (plan !== null && p.units(UnitType.City).length > 0 ? 8 : 0) +
++          (inland && outward(p) ? 4 : 0) +
++          Number(ownsStructures(p)) * 2 +
++          (plan === null
++            ? Number(opponent !== null && opponent.sharesBorderWith(p))
++            : Number(this.wrapShare(p) >= 0.5) +
++              (opponent !== null && opponent.sharesBorderWith(p)
++                ? ringing
++                  ? Math.max(plan.cutoff, 3)
++                  : plan.cutoff
++                : 0)),
++      );
++    }
++    const rank = (p: Player) => ranks.get(p) ?? 0;
++    const sortedBots = ordered.sort((a, b) => rank(b) - rank(a));
+     const reducedBots = sortedBots.slice(0, this.getBotAttackMaxParallelism());
+ 
+     for (const bot of reducedBots) {
+@@ -828,6 +1615,22 @@ export class AiAttackBehavior {
+     );
+   }
+ 
++  /** Share of the bot's border tiles that touch our land (0..1). */
++  private wrapShare(bot: Player): number {
++    const border = bot.borderTiles();
++    let total = 0;
++    let ours = 0;
++    for (const t of border) {
++      total++;
++      if (
++        this.game.neighbors(t).some((n) => this.game.owner(n) === this.player)
++      ) {
++        ours++;
++      }
++    }
++    return total === 0 ? 0 : ours / total;
++  }
++
+   private neighboringBots(): Player[] {
+     return this.player
+       .nearby()
+@@ -864,6 +1667,27 @@ export class AiAttackBehavior {
+   }
+ 
+   private getBotAttackMaxParallelism(): number {
++    // TRAINER.PRO (feedback from strong players): early on, take one bot, then one more
++    // every botRamp ticks, for the gold, instead of spreading over many at once. One bot
++    // for 3 minutes was too slow (Kris, 2026-10-13: "plays too safe"; he takes 2-5 bots at
++    // once from minute 2)
++    const trainerPlan = trainerAttackPlan(this.game, this.player.name());
++    if (trainerPlan !== null) {
++      const played =
++        this.game.ticks() - this.game.config().numSpawnPhaseTurns();
++      const ramp = 1 + Math.floor(Math.max(0, played) / trainerPlan.botRamp);
++      // Top 1v1 players keep only ~30% of their troop cap at home in minutes 1-4 and put
++      // the rest into bots (10 ranked games of the top 5 on Australia, 2026-10-14); the
++      // bot sat at 50-60% and ended minute 3 with half their land. Troops piling up
++      // above that open more bots at once.
++      const share =
++        this.player.troops() / this.game.config().maxTroops(this.player);
++      const surplus = Math.max(
++        0,
++        Math.floor((share - TRAINER_HOME_SHARE) / 0.06),
++      );
++      if (ramp < 6) return Math.min(6, ramp + surplus);
++    }
+     const { difficulty } = this.game.config().gameConfig();
+     switch (difficulty) {
+       case Difficulty.Easy:
+@@ -1405,7 +2229,18 @@ export class AiAttackBehavior {
+     // Use the expand ratio when attacking a bot that owns structures — we need to
+     // recapture those structures ASAP, even before reaching the normal reserve.
+     const useReserve = target.isPlayer() && !botWithStructures;
+-    const reserveRatio = useReserve ? this.reserveRatio : this.expandRatio;
++    let reserveRatio = useReserve ? this.reserveRatio : this.expandRatio;
++    // TRAINER.PRO: into bots, keep no more at home than top players do (~30% of the cap).
++    // Training drove the reserve to 43%: in BTrUnsMK (2026-10-15) we sat at 2/3 of our cap,
++    // grew at half the player's pace and fell to one strike from twice our army.
++    if (
++      target.isPlayer() &&
++      target.type() === PlayerType.Bot &&
++      this.player.type() === PlayerType.Nation &&
++      trainerAttackPlan(this.game, this.player.name()) !== null
++    ) {
++      reserveRatio = Math.min(reserveRatio, TRAINER_HOME_SHARE);
++    }
+     const targetTroops = maxTroops * reserveRatio;
+ 
+     let troops;
+@@ -1836,6 +2671,21 @@ export class AiAttackBehavior {
+       }
+       case Difficulty.Hard:
+       case Difficulty.Impossible: {
++        // TRAINER.PRO troop saving (Bembe, 2026-11-01), off by default: start at 95% of what the
++        // bot needs and top up in 10% steps up to 115%. Measured: 29k tiles at 2 min instead of
++        // 37k (75%/15% steps: 26k), under-stacked attacks lose more per tile
++        if (
++          this.player.type() === PlayerType.Nation &&
++          trainerAttackPlan(this.game, this.player.name())?.trickle === true
++        ) {
++          const need = this.botAttackTroopsNeeded(target);
++          const stack = this.ourStackAgainst(target);
++          const want =
++            stack === 0
++              ? need * 0.95
++              : Math.min(need * 0.1, need * 1.15 - stack);
++          return want > 0 && want <= maxTroops ? want : 0;
++        }
+         // Top up what already attacks the bot, or wait until we can send it all
+         const troops =
+           this.botAttackTroopsNeeded(target) * 1.3 -
+diff --git a/packages/engine/src/game/NationCreation.ts b/packages/engine/src/game/NationCreation.ts
+index 800953a7..d5872a19 100644
+--- a/packages/engine/src/game/NationCreation.ts
++++ b/packages/engine/src/game/NationCreation.ts
+@@ -34,6 +34,42 @@ export function createNationsForGame(
+   additionalNations: AdditionalNation[],
+   numHumans: number,
+   random: PseudoRandom,
++): Nation[] {
++  const nations = createNations(
++    gameStart,
++    manifestNations,
++    additionalNations,
++    numHumans,
++    random,
++  );
++  // TRAINER.PRO: the opponent carries our name instead of a country.
++  const botName = gameStart.config.trainerBotName;
++  if (botName === undefined) return nations;
++  return nations.map(
++    (n) =>
++      new Nation(
++        n.spawnCell,
++        new PlayerInfo(
++          botName,
++          PlayerType.Nation,
++          null,
++          n.playerInfo.id,
++          false,
++          null,
++          [],
++          null,
++          null,
++        ),
++      ),
++  );
++}
++
++function createNations(
++  gameStart: GameStartInfo,
++  manifestNations: ManifestNation[],
++  additionalNations: AdditionalNation[],
++  numHumans: number,
++  random: PseudoRandom,
+ ): Nation[] {
+   const toNation = (n: ManifestNation): Nation =>
+     new Nation(
+diff --git a/scripts/trainer/ReplayTrainerGame.ts b/scripts/trainer/ReplayTrainerGame.ts
+new file mode 100644
+index 00000000..72c50ae8
+--- /dev/null
++++ b/scripts/trainer/ReplayTrainerGame.ts
+@@ -0,0 +1,119 @@
++// TRAINER.PRO analysis: replays a recorded game vs our bot (teamstats.pro /api/trainer/game/<id>)
++// headless and returns a timeline of both sides, so we can see how the bot lost.
++import {
++  GameMapType,
++  PlayerType,
++  UnitType,
++} from "@openfront/engine-api/game/GameTypes";
++import { MapManifest } from "@openfront/engine-api/game/MapFiles";
++import { GameStartInfo } from "@openfront/engine-api/Schemas";
++import { createGameRunner } from "@openfront/engine/GameRunner";
++import {
++  GameMapLoader,
++  loadMapFiles,
++  MapData,
++} from "@openfront/shared/GameMapLoader";
++import fs from "fs";
++import path from "path";
++
++class PlayDirMapLoader implements GameMapLoader {
++  private manifest: Record<string, string>;
++  constructor(private playDir: string) {
++    this.manifest = JSON.parse(
++      fs.readFileSync(path.join(playDir, "asset-manifest.json"), "utf8"),
++    );
++  }
++  private file(folder: string, name: string): string {
++    return path.join(this.playDir, this.manifest[`maps/${folder}/${name}`]);
++  }
++  getMapData(map: GameMapType): MapData {
++    const key = Object.keys(GameMapType).find(
++      (k) => GameMapType[k as keyof typeof GameMapType] === map,
++    )!;
++    const folder = key.toLowerCase();
++    const bin = (name: string) => async () =>
++      new Uint8Array(fs.readFileSync(this.file(folder, name)));
++    return {
++      mapBin: bin("map.bin"),
++      map4xBin: bin("map4x.bin"),
++      map16xBin: bin("map16x.bin"),
++      manifest: async () =>
++        JSON.parse(
++          fs.readFileSync(this.file(folder, "manifest.json"), "utf8"),
++        ) as MapManifest,
++      webpPath: "",
++      layerPng: async () => {
++        throw new Error("no layers");
++      },
++    };
++  }
++}
++
++// eslint-disable-next-line @typescript-eslint/no-explicit-any
++export async function replayTrainerGame(rec: any, playDir: string) {
++  const start = {
++    gameID: rec.info.gameID,
++    lobbyCreatedAt: rec.info.lobbyCreatedAt,
++    config: rec.info.config,
++    players: rec.info.players,
++  } as GameStartInfo;
++  const files = await loadMapFiles(
++    new PlayDirMapLoader(playDir),
++    start.config.gameMap,
++    start.config.gameMapSize,
++  );
++  let err = "";
++  const runner = await createGameRunner(start, undefined, files, (u) => {
++    if ("errMsg" in u) err = u.errMsg;
++  });
++  // eslint-disable-next-line @typescript-eslint/no-explicit-any
++  const game = (runner as any).game;
++  const byTurn = new Map<number, unknown[]>();
++  for (const t of rec.turns) byTurn.set(t.turnNumber, t.intents ?? []);
++  const last = Math.max(
++    rec.info.num_turns ?? 0,
++    ...rec.turns.map((t: { turnNumber: number }) => t.turnNumber),
++  );
++  const timeline: unknown[] = [];
++  const side = (p: any) =>
++    p === undefined
++      ? null
++      : {
++          tiles: p.numTilesOwned(),
++          troops: Math.round(p.troops()),
++          max: Math.round(game.config().maxTroops(p)),
++          gold: Number(p.gold()),
++          alive: p.isAlive(),
++          city: p.unitsOwned(UnitType.City),
++          port: p.unitsOwned(UnitType.Port),
++          post: p.unitsOwned(UnitType.DefensePost),
++          silo: p.unitsOwned(UnitType.MissileSilo),
++          sam: p.unitsOwned(UnitType.SAMLauncher),
++          warship: p.unitsOwned(UnitType.Warship),
++          // attacks between the two sides, troops in them
++          out: p.outgoingAttacks().map((a: any) => ({
++            to: a.target().isPlayer?.() ? a.target().type() : "free",
++            troops: Math.round(a.troops()),
++          })),
++        };
++  for (let turn = 0; turn <= last; turn++) {
++    runner.addTurn({
++      turnNumber: turn,
++      intents: byTurn.get(turn) ?? [],
++    } as never);
++    runner.executeNextTick();
++    if (err) throw new Error(err);
++    if (game.ticks() % 50 === 0 || turn === last) {
++      const players = game.players();
++      const human = players.find((p: any) => p.type() === PlayerType.Human);
++      const bot = players.find((p: any) => p.type() === PlayerType.Nation);
++      timeline.push({
++        tick: game.ticks(),
++        spawn: game.inSpawnPhase(),
++        human: side(human),
++        bot: side(bot),
++      });
++    }
++  }
++  return timeline;
++}
+diff --git a/scripts/trainer/SelfPlayGame.ts b/scripts/trainer/SelfPlayGame.ts
+new file mode 100644
+index 00000000..3fff81e4
+--- /dev/null
++++ b/scripts/trainer/SelfPlayGame.ts
+@@ -0,0 +1,245 @@
++// TRAINER.PRO self-play: one headless ranked-1v1-like game between two trainer bots
++// ("A" and "B", each with its own policy) among the map's bots. Bundled by
++// teamstats.pro's tools/trainer/build-selfplay.sh into tools/trainer-selfplay/game.cjs
++// and run by tools/trainer-selfplay/train.cjs on worker threads.
++import {
++  Cell,
++  Difficulty,
++  GameMapSize,
++  GameMapType,
++  GameMode,
++  GameType,
++  Nation,
++  PlayerInfo,
++  PlayerType,
++  UnitType,
++} from "@openfront/engine-api/game/GameTypes";
++import { MapManifest } from "@openfront/engine-api/game/MapFiles";
++import { GameConfig, GameStartInfo } from "@openfront/engine-api/Schemas";
++import { loadTerrainMap } from "@openfront/engine-lib/game/TerrainMapLoader";
++import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
++import { simpleHash } from "@openfront/engine-lib/Util";
++import { EngineConfig } from "@openfront/engine/configuration/EngineConfig";
++import { Executor } from "@openfront/engine/execution/ExecutionManager";
++import {
++  setTrainerPolicyFor,
++  TrainerPolicy,
++} from "@openfront/engine/execution/nation/TrainerPolicy";
++import { createGame } from "@openfront/engine/game/GameImpl";
++import { createNationsForGame } from "@openfront/engine/game/NationCreation";
++import { GameRunner } from "@openfront/engine/GameRunner";
++import {
++  GameMapLoader,
++  loadMapFiles,
++  MapData,
++} from "@openfront/shared/GameMapLoader";
++import fs from "fs";
++import path from "path";
++
++/** Reads maps from the TRAINER.PRO client build (trainer/play), whose files have hashed names. */
++class PlayDirMapLoader implements GameMapLoader {
++  private manifest: Record<string, string>;
++  constructor(private playDir: string) {
++    this.manifest = JSON.parse(
++      fs.readFileSync(path.join(playDir, "asset-manifest.json"), "utf8"),
++    );
++  }
++  private file(folder: string, name: string): string {
++    const rel = this.manifest[`maps/${folder}/${name}`];
++    if (rel === undefined)
++      throw new Error(`map file missing: ${folder}/${name}`);
++    return path.join(this.playDir, rel);
++  }
++  getMapData(map: GameMapType): MapData {
++    const key = Object.keys(GameMapType).find(
++      (k) => GameMapType[k as keyof typeof GameMapType] === map,
++    );
++    if (key === undefined) throw new Error(`unknown map: ${map}`);
++    const folder = key.toLowerCase();
++    const bin = (name: string) => async () =>
++      new Uint8Array(fs.readFileSync(this.file(folder, name)));
++    return {
++      mapBin: bin("map.bin"),
++      map4xBin: bin("map4x.bin"),
++      map16xBin: bin("map16x.bin"),
++      manifest: async () =>
++        JSON.parse(
++          fs.readFileSync(this.file(folder, "manifest.json"), "utf8"),
++        ) as MapManifest,
++      webpPath: "",
++      layerPng: async () => {
++        throw new Error("no layers in self-play");
++      },
++    };
++  }
++}
++
++export interface SelfPlayGame {
++  playDir: string;
++  map: string; // GameMapType value, e.g. "Australia"
++  compact: boolean;
++  seed: string;
++  a: TrainerPolicy;
++  b: TrainerPolicy;
++  // Only this many ticks of play (after the spawn phase); the whole game when unset.
++  // Humans out-grow the bot in the first 2 minutes (teamstats.pro, 2026-11-01): short games
++  // measure that start.
++  stopAfter?: number;
++}
++
++export interface SelfPlayResult {
++  winner: "A" | "B" | "draw";
++  tilesA: number;
++  tilesB: number;
++  ticks: number;
++  ms: number;
++  // What each side owned at the end (checks the bot's rules)
++  units: Record<"A" | "B", Record<string, number>>;
++  troopShare: Record<"A" | "B", number>; // average troops / max troops
++  land: Record<"A" | "B", number[]>; // tiles every 30 s of play
++}
++
++export async function runSelfPlayGame(
++  g: SelfPlayGame,
++): Promise<SelfPlayResult> {
++  const t0 = Date.now();
++  console.debug = () => {};
++  const config: GameConfig = {
++    gameMap: g.map as GameMapType,
++    gameMapSize: g.compact ? GameMapSize.Compact : GameMapSize.Normal,
++    gameType: GameType.Public,
++    gameMode: GameMode.FFA,
++    difficulty: Difficulty.Impossible,
++    maxTimerValue: g.compact ? 10 : 15,
++    bots: g.compact ? 100 : 400,
++    nations: 2,
++    infiniteGold: false,
++    infiniteTroops: false,
++    donateGold: false,
++    donateTroops: false,
++    instantBuild: false,
++    randomSpawn: false,
++    spawnImmunityDuration: 30 * 10,
++    disabledUnits: [],
++    trainerBotName: "Teamstats.PRO",
++  };
++  const start: GameStartInfo = {
++    gameID: g.seed,
++    lobbyCreatedAt: 0,
++    config,
++    players: [],
++  };
++  setTrainerPolicyFor("A", g.a);
++  setTrainerPolicyFor("B", g.b);
++  const terrain = await loadTerrainMap(
++    await loadMapFiles(
++      new PlayDirMapLoader(g.playDir),
++      config.gameMap,
++      config.gameMapSize,
++    ),
++  );
++  const random = new PseudoRandom(simpleHash(g.seed));
++  const nations = createNationsForGame(
++    start,
++    terrain.nations,
++    terrain.additionalNations,
++    0,
++    random,
++  ).map(
++    (n, i) =>
++      new Nation(
++        n.spawnCell === undefined
++          ? undefined
++          : new Cell(n.spawnCell.x, n.spawnCell.y),
++        new PlayerInfo(
++          i === 0 ? "A" : "B",
++          PlayerType.Nation,
++          null,
++          n.playerInfo.id,
++        ),
++      ),
++  );
++  const game = createGame(
++    [],
++    nations,
++    terrain.gameMap,
++    terrain.miniGameMap,
++    new EngineConfig(config, false),
++    terrain.teamGameSpawnAreas,
++  );
++  let error = "";
++  const runner = new GameRunner(
++    game,
++    new Executor(game, g.seed, undefined),
++    (u) => {
++      if ("errMsg" in u) error = u.errMsg;
++    },
++  );
++  runner.init();
++  let turn = 0;
++  const step = () => {
++    runner.addTurn({ turnNumber: turn++, intents: [] });
++    runner.executeNextTick();
++    if (error) throw new Error(error);
++  };
++  while (game.inSpawnPhase()) step();
++  // A nation whose spawn failed lands a few ticks after the spawn phase (NationExecution)
++  const named = (n: string) => game.players().find((p) => p.name() === n);
++  for (
++    let i = 0;
++    i < 50 && (named("A") === undefined || named("B") === undefined);
++    i++
++  )
++    step();
++  const a = named("A");
++  const b = named("B");
++  if (a === undefined || b === undefined)
++    throw new Error("a nation did not spawn");
++  const playStart = game.ticks();
++  const end =
++    playStart + Math.min(config.maxTimerValue! * 600, g.stopAfter ?? Infinity);
++  const share: Record<"A" | "B", number[]> = { A: [], B: [] };
++  const land: Record<"A" | "B", number[]> = { A: [], B: [] };
++  while (game.ticks() < end && a.isAlive() && b.isAlive()) {
++    step();
++    if (game.ticks() % 300 === 0) {
++      for (const [k, p] of [
++        ["A", a],
++        ["B", b],
++      ] as const) {
++        share[k].push(p.troops() / game.config().maxTroops(p));
++      }
++    }
++    if ((game.ticks() - playStart) % 300 === 0) {
++      land.A.push(a.isAlive() ? a.numTilesOwned() : 0);
++      land.B.push(b.isAlive() ? b.numTilesOwned() : 0);
++    }
++  }
++  const avg = (x: number[]) =>
++    x.length
++      ? Math.round((x.reduce((s, v) => s + v, 0) / x.length) * 100) / 100
++      : 0;
++  const tilesA = a.isAlive() ? a.numTilesOwned() : 0;
++  const tilesB = b.isAlive() ? b.numTilesOwned() : 0;
++  const owned = (p: typeof a) => ({
++    city: p.unitsOwned(UnitType.City),
++    port: p.unitsOwned(UnitType.Port),
++    factory: p.unitsOwned(UnitType.Factory),
++    sam: p.unitsOwned(UnitType.SAMLauncher),
++    silo: p.unitsOwned(UnitType.MissileSilo),
++    warship: p.unitsOwned(UnitType.Warship),
++  });
++  return {
++    winner: tilesA > tilesB ? "A" : tilesB > tilesA ? "B" : "draw",
++    tilesA,
++    tilesB,
++    ticks: game.ticks(),
++    ms: Date.now() - t0,
++    units: { A: owned(a), B: owned(b) },
++    troopShare: { A: avg(share.A), B: avg(share.B) },
++    land,
++  };
++}
++
++// teamstats.pro's trainer-learner.js also replays humans' games against changed bots ("ghosts")
++export { replayTrainerGame } from "./ReplayTrainerGame";
+diff --git a/src/client/ClientGameRunner.ts b/src/client/ClientGameRunner.ts
+index a25226ff..504cf7a4 100644
+--- a/src/client/ClientGameRunner.ts
++++ b/src/client/ClientGameRunner.ts
+@@ -54,6 +54,7 @@ import {
+   loadCachedTerrainMap,
+   terrainMapFileLoader,
+ } from "./TerrainMapFileLoader";
++import { noteTrainerState } from "./Trainer";
+ import { GoToPlayerEvent } from "./TransformHandler";
+ import {
+   counterAttackTroops,
+@@ -1032,6 +1033,7 @@ export class ClientGameRunner {
+         this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
+       });
+       this.gameView.update(gu);
++      noteTrainerState(this.gameView);
+       this.webglBuilder?.update(this.gameView);
+       this.renderer.tick();
+       if (gu.tickExecutionDuration !== undefined) {
+diff --git a/src/client/LangSelector.ts b/src/client/LangSelector.ts
+index 1bc4d74a..8a3a002e 100644
+--- a/src/client/LangSelector.ts
++++ b/src/client/LangSelector.ts
+@@ -4,6 +4,7 @@ import { customElement, state } from "lit/decorators.js";
+ import { desktopSteamLocale } from "./DesktopShell";
+ import "./LanguageModal";
+ import { LanguageModal } from "./LanguageModal";
++import { isTrainer } from "./Trainer";
+ import { formatDebugTranslation } from "./Utils";
+ 
+ import en from "../../resources/lang/en.json";
+@@ -297,7 +298,8 @@ export class LangSelector extends LitElement {
+       "tutorial-panel",
+     ];
+ 
+-    document.title = this.translateText("main.title") ?? document.title;
++    if (!isTrainer())
++      document.title = this.translateText("main.title") ?? document.title;
+ 
+     document.querySelectorAll("[data-i18n]").forEach((element) => {
+       const key = element.getAttribute("data-i18n");
+diff --git a/src/client/LocalServer.ts b/src/client/LocalServer.ts
+index b392123a..befc198a 100644
+--- a/src/client/LocalServer.ts
++++ b/src/client/LocalServer.ts
+@@ -30,6 +30,7 @@ import {
+   ReplaySpeedChangeEvent,
+ } from "./InputHandler";
+ import { startSingleplayerHeartbeat } from "./SingleplayerHeartbeat";
++import { isTrainer, TRAINER_API, trainerSnapshot } from "./Trainer";
+ import {
+   defaultReplaySpeedMultiplier,
+   ReplaySpeedMultiplier,
+@@ -65,11 +66,15 @@ export class LocalServer {
+   // skipped win-time uploads during teardown.
+   private archived = false;
+   private archiveInFlight = false;
++  private finalPending: "now" | "unloading" | null = null;
+ 
+   private turnsExecuted = 0;
+   private turnStartTime = 0;
+ 
+   private turnCheckInterval: NodeJS.Timeout;
++  // TRAINER.PRO: the game so far goes to teamstats.pro every 30 s, so leaving early
++  // (where the last upload is capped at 64 KiB and often lost) still leaves a record
++  private progressInterval: ReturnType<typeof setInterval> | null = null;
+   private stopHeartbeat: (() => void) | null = null;
+   private clientConnect: () => void;
+   private clientMessage: (message: ServerMessage) => void;
+@@ -90,6 +95,12 @@ export class LocalServer {
+ 
+   start() {
+     console.log("local server starting");
++    if (isTrainer() && !this.isReplay) {
++      this.progressInterval = setInterval(
++        () => this.archiveGameRecord(false, false),
++        30_000,
++      );
++    }
+     this.turnCheckInterval = setInterval(() => {
+       const turnIntervalMs =
+         ClientEnv.turnIntervalMs() * this.replaySpeedMultiplier;
+@@ -287,6 +298,7 @@ export class LocalServer {
+   public endGame() {
+     console.log("local server ending game");
+     clearInterval(this.turnCheckInterval);
++    if (this.progressInterval !== null) clearInterval(this.progressInterval);
+     this.stopHeartbeat?.();
+     this.stopHeartbeat = null;
+     if (this.isReplay) {
+@@ -297,8 +309,11 @@ export class LocalServer {
+     this.archiveGameRecord(true);
+   }
+ 
+-  private archiveGameRecord(unloading: boolean) {
+-    if (this.archived || this.archiveInFlight) {
++  private archiveGameRecord(unloading: boolean, final = true) {
++    if (this.archived) return;
++    if (this.archiveInFlight) {
++      // A progress upload is on its way: the final one follows it
++      if (final) this.finalPending = unloading ? "unloading" : "now";
+       return;
+     }
+     const players: PlayerRecord[] = [
+@@ -331,17 +346,20 @@ export class LocalServer {
+       return;
+     }
+ 
+-    this.archiveGame(result.data, unloading);
++    this.archiveGame(result.data, unloading, final);
+   }
+ 
+   private async archiveGame(
+     record: PartialGameRecord,
+     unloading: boolean,
++    final = true,
+   ): Promise<void> {
+     this.archiveInFlight = true;
+     try {
+-      const authHeader = await getAuthHeader();
+-      if (authHeader === "") {
++      // TRAINER.PRO: the record goes to teamstats.pro instead (no OpenFront session)
++      const trainer = isTrainer();
++      const authHeader = trainer ? "" : await getAuthHeader();
++      if (!trainer && authHeader === "") {
+         // The archive API requires a session. Guests have one too, so this
+         // only trips when none could be established (e.g. API unreachable).
+         return;
+@@ -349,27 +367,38 @@ export class LocalServer {
+       // Replays refuse to load unless the archived commit matches the client
+       // build, and the API worker can't stamp it (it has a different build).
+       const jsonString = JSON.stringify(
+-        { ...record, gitCommit: ClientEnv.gitCommit() },
++        {
++          ...record,
++          gitCommit: ClientEnv.gitCommit(),
++          ...(trainer ? { trainerEnd: trainerSnapshot() } : {}),
++        },
+         replacer,
+       );
+       const compressedData = await compress(jsonString);
++      // A hung upload would block every later one (TRAINER.PRO replays stopped at 1:26,
++      // Bembe 2026-10-13): give up after 20 s, the next one carries everything anyway
++      const timeout = trainer && !unloading ? AbortSignal.timeout(20_000) : undefined;
+       const response = await fetch(
+-        `${getApiBase()}/archive_singleplayer_game`,
++        trainer
++          ? `${TRAINER_API}/games`
++          : `${getApiBase()}/archive_singleplayer_game`,
+         {
+           method: "POST",
+           headers: {
+             "Content-Type": "application/json",
+             "Content-Encoding": "gzip",
+-            Authorization: authHeader,
++            ...(trainer ? {} : { Authorization: authHeader }),
+           },
++          credentials: "same-origin",
+           body: compressedData,
+           // keepalive lets the request outlive page teardown but caps the body
+           // at 64 KiB, so only set it when the page is actually unloading.
+           keepalive: unloading,
++          signal: timeout,
+         },
+       );
+       if (response.ok) {
+-        this.archived = true;
++        if (final) this.archived = true;
+       } else {
+         console.error(
+           `Failed to archive singleplayer game: ${response.status}`,
+@@ -379,6 +408,9 @@ export class LocalServer {
+       console.warn("Failed to archive singleplayer game:", error);
+     } finally {
+       this.archiveInFlight = false;
++      const pending = this.finalPending;
++      this.finalPending = null;
++      if (pending !== null) this.archiveGameRecord(pending === "unloading");
+     }
+   }
+ }
+diff --git a/src/client/Main.ts b/src/client/Main.ts
+index e3aa90f8..fd0395bc 100644
+--- a/src/client/Main.ts
++++ b/src/client/Main.ts
+@@ -135,6 +135,7 @@ import {
+   type TurnstileToken,
+ } from "./TurnstileToken";
+ // Before the first userMeResponse, for the modals that load after it.
++import { isTrainer, startTrainerGame, trainerPlayerName } from "./Trainer";
+ import "./UserMeBroadcast";
+ import { UserSettings } from "./UserSettings";
+ import "./UsernameInput";
+@@ -643,6 +644,8 @@ class Client {
+       });
+     });
+     document.addEventListener("leave-lobby", this.handleLeaveLobby.bind(this));
++    // TRAINER.PRO: no menu, the match starts as soon as the page is up.
++    if (isTrainer()) setTimeout(() => void startTrainerGame(), 0);
+     document.addEventListener("kick-player", this.handleKickPlayer.bind(this));
+     document.addEventListener(
+       "toggle_game_start_timer",
+@@ -738,7 +741,10 @@ class Client {
+       const isAdFree =
+         userMeResponse !== false && userMeResponse.player?.adfree === true;
+       window.adsEnabled =
+-        !isAdFree && !crazyGamesSDK.isOnCrazyGames() && !isDesktopShell();
++        !isTrainer() &&
++        !isAdFree &&
++        !crazyGamesSDK.isOnCrazyGames() &&
++        !isDesktopShell();
+       // Ad-eligible users only: paid/adfree users must never load Admiral (its
+       // adblock popup fires autonomously once the payload runs). Start watching
+       // adblock state; once a blocker is ever detected the in-game ad is
+@@ -1768,7 +1774,9 @@ class Client {
+     // to describe the same decision, so they are read together rather than
+     // asked for separately.
+     const resolvedName =
+-      this.usernameInput?.resolvedName() ?? fallbackPlayerName();
++      trainerPlayerName() ??
++      this.usernameInput?.resolvedName() ??
++      fallbackPlayerName();
+     let joinLobby: typeof import("./ClientGameRunner").joinLobby;
+     try {
+       ({ joinLobby } = await loadGameClient());
+@@ -1779,7 +1787,7 @@ class Client {
+       console.error("game client failed to load:", err);
+       if (this.mostRecentJoinEvent !== event.timeStamp) return;
+       // The URL names the singleplayer game now, which no server has.
+-      if (isSingleplayer) history.replaceState(null, "", "/");
++      if (isSingleplayer && !isTrainer()) history.replaceState(null, "", "/");
+       reloadForUpdate();
+       return;
+     }
+@@ -1876,7 +1884,7 @@ class Client {
+       setInGameSignal(true);
+ 
+       const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
+-      if (isReplayShellHost(window.location.hostname)) {
++      if (isTrainer() || isReplayShellHost(window.location.hostname)) {
+         // Keep the canonical replay URL (replay.<domain>/<gameId>): the
+         // /game/<id> shape and the #refresh trampoline only exist on the
+         // game-server origin, so rewriting here would leave a URL that 404s
+@@ -1997,6 +2005,7 @@ class Client {
+   }
+ 
+   private updateJoinUrlForShare(lobbyId: string) {
++    if (isTrainer()) return; // TRAINER.PRO keeps its own URL
+     const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
+     let targetUrl: string;
+     if (isReplayShellHost(window.location.hostname)) {
+diff --git a/src/client/Trainer.ts b/src/client/Trainer.ts
+new file mode 100644
+index 00000000..d5e7f9d8
+--- /dev/null
++++ b/src/client/Trainer.ts
+@@ -0,0 +1,296 @@
++// TRAINER.PRO (teamstats.pro/trainer): a modified build of the OpenFront
++// client that skips the menu and starts a 1v1 against one AI nation.
++// The page sets window.__TRAINER__ = { home } before this bundle runs; the
++// match settings come from the URL: ?map=Australia&difficulty=Medium&size=Normal&name=Bembe
++import {
++  Difficulty,
++  GameMapSize,
++  GameMode,
++  GameType,
++  PlayerType,
++} from "@openfront/engine-api/game/GameTypes";
++import { GameMapType } from "@openfront/engine-api/game/Maps.gen";
++import { generateID } from "@openfront/shared/SharedUtil";
++import type { ResolvedPlayerName } from "./PlayerName";
++
++// Read once at load: the client rewrites the address bar during the join.
++const QUERY = new URLSearchParams(
++  typeof window === "undefined" ? "" : window.location.search,
++);
++
++interface TrainerPage {
++  home: string;
++}
++
++function page(): TrainerPage | undefined {
++  return (window as unknown as { __TRAINER__?: TrainerPage }).__TRAINER__;
++}
++
++const TRAINER_BOT_NAME = "Teamstats.PRO";
++
++export function isTrainer(): boolean {
++  return typeof window !== "undefined" && page() !== undefined;
++}
++
++// Games vs our bot are archived on teamstats.pro (admins watch their replays there)
++export const TRAINER_API = "/api/trainer";
++
++/** Land and army of both sides, kept fresh during a game and sent with its record: when
++ * the player leaves before the end, teamstats.pro judges the result from it (HIDDEN ELO). */
++export interface TrainerSnapshot {
++  tick: number;
++  player: { tiles: number; troops: number; alive: boolean };
++  bot: { tiles: number; troops: number; alive: boolean };
++}
++let snapshot: TrainerSnapshot | null = null;
++export function trainerSnapshot(): TrainerSnapshot | null {
++  return snapshot;
++}
++interface SnapshotPlayer {
++  name(): string;
++  type(): PlayerType;
++  numTilesOwned(): number;
++  troops(): number;
++  isAlive(): boolean;
++}
++export function noteTrainerState(game: {
++  ticks(): number;
++  players(): SnapshotPlayer[];
++  inSpawnPhase?(): boolean;
++}): void {
++  if (!isTrainer() || game.ticks() % 20 !== 0) return;
++  const players = game.players();
++  const bot = players.find((p) => p.name() === TRAINER_BOT_NAME);
++  const me = players.find((p) => p.type() === PlayerType.Human);
++  if (bot === undefined || me === undefined) return;
++  const side = (p: SnapshotPlayer) => ({
++    tiles: p.numTilesOwned(),
++    troops: Math.round(p.troops()),
++    alive: p.isAlive(),
++  });
++  snapshot = { tick: game.ticks(), player: side(me), bot: side(bot) };
++  if (game.inSpawnPhase?.() === true || trainerReplaying()) return;
++  if (game.ticks() % 50 === 0) history.push(snapshot);
++  // The game goes on against the map's bots once one of us is gone: we end it here with a
++  // result screen (Bembe, 2026-11-01)
++  if (!ended && (!snapshot.bot.alive || !snapshot.player.alive)) {
++    ended = true;
++    history.push(snapshot);
++    showTrainerEnd(snapshot.player.alive);
++  }
++}
++
++// Land and army of both sides every 5 s of play, for the result screen
++const history: TrainerSnapshot[] = [];
++let ended = false;
++
++const fmt = (n: number) =>
++  n >= 1e6
++    ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M"
++    : n >= 1e3
++      ? Math.round(n / 1e3) + "K"
++      : String(Math.round(n));
++const clock = (ticks: number) => {
++  const s = Math.max(0, Math.round(ticks / 10));
++  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
++};
++
++/** A line chart of you vs the bot, as SVG markup. */
++function chart(
++  title: string,
++  pick: (s: TrainerSnapshot, who: "player" | "bot") => number,
++): string {
++  const W = 320,
++    H = 120,
++    P = 6;
++  const t0 = history[0]?.tick ?? 0,
++    t1 = history[history.length - 1]?.tick ?? 1;
++  const top = Math.max(
++    1,
++    ...history.flatMap((s) => [pick(s, "player"), pick(s, "bot")]),
++  );
++  const line = (who: "player" | "bot") =>
++    history
++      .map((s) => {
++        const x = P + ((s.tick - t0) / Math.max(1, t1 - t0)) * (W - 2 * P);
++        const y = H - P - (pick(s, who) / top) * (H - 2 * P);
++        return `${x.toFixed(1)},${y.toFixed(1)}`;
++      })
++      .join(" ");
++  return `<figure style="margin:0;flex:1 1 300px;min-width:0">
++    <figcaption style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#9fb0c8;margin-bottom:6px">${title} <span style="float:right;color:#cfd8e6;letter-spacing:0">max ${fmt(top)}</span></figcaption>
++    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;background:rgba(255,255,255,.04);border-radius:10px" role="img" aria-label="${title}">
++      <polyline points="${line("bot")}" fill="none" stroke="#ff5fb0" stroke-width="2.5" stroke-linejoin="round"/>
++      <polyline points="${line("player")}" fill="none" stroke="#57e6ff" stroke-width="2.5" stroke-linejoin="round"/>
++    </svg></figure>`;
++}
++
++function showTrainerEnd(won: boolean): void {
++  const last = history[history.length - 1];
++  const t0 = history[0]?.tick ?? last.tick;
++  const peak = (who: "player" | "bot", k: "tiles" | "troops") =>
++    Math.max(0, ...history.map((s) => s[who][k]));
++  // When the lead in land changed hands for the last time
++  let lead: number | null = null;
++  for (let i = 1; i < history.length; i++) {
++    const a = history[i - 1],
++      b = history[i];
++    if (
++      Math.sign(a.player.tiles - a.bot.tiles) !==
++      Math.sign(b.player.tiles - b.bot.tiles)
++    )
++      lead = b.tick;
++  }
++  const stat = (v: string, l: string) =>
++    `<div style="background:rgba(255,255,255,.05);border-radius:12px;padding:10px 12px"><b style="display:block;font-size:22px;color:#f3f6fb">${v}</b><span style="font-size:12px;color:#9fb0c8">${l}</span></div>`;
++  const box = document.createElement("div");
++  box.id = "trainer-end";
++  box.setAttribute("role", "dialog");
++  box.style.cssText =
++    "position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(4,8,14,.72);backdrop-filter:blur(3px);font-family:system-ui,sans-serif";
++  box.innerHTML = `<div style="width:min(720px,100%);max-height:100%;overflow:auto;background:#0e1520;border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:22px 20px;box-shadow:0 20px 60px rgba(0,0,0,.6);color:#dfe7f2">
++    <div style="font-size:12px;letter-spacing:.3em;color:#9fb0c8;text-transform:uppercase">TRAINER.PRO · 1v1 vs ${TRAINER_BOT_NAME}</div>
++    <h2 style="margin:6px 0 2px;font-size:clamp(34px,8vw,56px);line-height:1;font-weight:900;color:${won ? "#57e6ff" : "#ff5fb0"}">${won ? "VICTORY" : "DEFEAT"}</h2>
++    <p id="trainer-end-record" style="margin:0 0 6px;color:#9fb0c8;font-size:14px" hidden></p>
++    <p style="margin:0 0 16px;color:#c3cbd8">${won ? `You beat ${TRAINER_BOT_NAME}` : `${TRAINER_BOT_NAME} beat you`} in ${clock(last.tick - t0)}${lead !== null ? `, the lead in land last changed at ${clock(lead - t0)}` : ""}.</p>
++    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-bottom:16px">
++      ${stat(clock(last.tick - t0), "game time")}
++      ${stat(fmt(peak("player", "tiles")), "your biggest land")}
++      ${stat(fmt(peak("bot", "tiles")), "bot's biggest land")}
++      ${stat(fmt(peak("player", "troops")), "your biggest army")}
++      ${stat(fmt(peak("bot", "troops")), "bot's biggest army")}
++    </div>
++    <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:10px">
++      ${chart("Land", (s, w) => s[w].tiles)}
++      ${chart("Army", (s, w) => s[w].troops)}
++    </div>
++    <p style="margin:0 0 16px;font-size:13px;color:#9fb0c8"><span style="color:#57e6ff">━ you</span> &nbsp; <span style="color:#ff5fb0">━ ${TRAINER_BOT_NAME}</span></p>
++    <div style="display:flex;gap:10px;flex-wrap:wrap">
++      <a href="${trainerHome()}" style="flex:1 1 160px;text-align:center;padding:12px 16px;border-radius:999px;background:#57e6ff;color:#04121a;font-weight:800;text-decoration:none">▶ Play again</a>
++      <button type="button" id="trainer-end-close" style="flex:1 1 160px;padding:12px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.2);background:transparent;color:#dfe7f2;font-weight:700;cursor:pointer">Look at the map</button>
++    </div></div>`;
++  document.body.appendChild(box);
++  // The player's record against the bot, this game included (it may not be uploaded yet)
++  fetch(`${TRAINER_API}/me`, { credentials: "same-origin", cache: "no-store" })
++    .then((r) => (r.ok ? r.json() : null))
++    .then((d) => {
++      const el = box.querySelector<HTMLElement>("#trainer-end-record");
++      if (!d?.user || el === null) return;
++      const counted =
++        d.last !== null &&
++        Date.now() - d.last.at < 60_000 &&
++        d.last.won === won;
++      const w = d.wins + (won && !counted ? 1 : 0);
++      const l = d.losses + (!won && !counted ? 1 : 0);
++      el.textContent = `Your record vs ${TRAINER_BOT_NAME}: ${w} wins, ${l} losses`;
++      el.hidden = false;
++    })
++    .catch(() => {});
++  box
++    .querySelector("#trainer-end-close")
++    ?.addEventListener("click", () => box.remove());
++}
++
++/** The page shows a replay (#replay-viewer=<id>, admins only): no new match then. */
++export function trainerReplaying(): boolean {
++  return isTrainer() && window.location.hash.startsWith("#replay-viewer=");
++}
++
++export function trainerHome(): string {
++  return page()?.home ?? "/";
++}
++
++// The name the TRAINER.PRO page passed (the admin's Discord name), else null.
++export function trainerPlayerName(): ResolvedPlayerName | null {
++  if (!isTrainer()) return null;
++  const name = (QUERY.get("name") ?? "").trim().slice(0, 24);
++  return name ? { name, source: "stored", verified: false } : null;
++}
++
++function pick<T extends string>(
++  values: readonly T[],
++  wanted: string | null,
++  fallback: T,
++): T {
++  return values.find((v) => v === wanted) ?? fallback;
++}
++
++// Same rules as OpenFront's ranked 1v1 (MapPlaylist.get1v1Config), but the
++// opponent is one AI nation instead of a second human.
++// What the bot learned from top players (teamstats.pro /api/trainer/policy),
++// or undefined for OpenFront's plain nation AI.
++async function loadPolicy(): Promise<string | undefined> {
++  if (QUERY.get("bot") === "nation") return undefined;
++  try {
++    const r = await fetch("/api/trainer/policy", {
++      credentials: "same-origin",
++      signal: AbortSignal.timeout(5000),
++    });
++    if (!r.ok) return undefined;
++    const text = await r.text();
++    return text.length > 2 && text.length < 400000 ? text : undefined;
++  } catch {
++    return undefined;
++  }
++}
++
++export async function startTrainerGame(): Promise<void> {
++  if (!isTrainer() || trainerReplaying()) return;
++  const trainerPolicy = await loadPolicy();
++  const q = QUERY;
++  const gameMap = pick(
++    Object.values(GameMapType),
++    q.get("map"),
++    GameMapType.Australia,
++  );
++  const difficulty = pick(
++    Object.values(Difficulty),
++    q.get("difficulty"),
++    Difficulty.Medium,
++  );
++  const compact = q.get("size") === "Compact";
++  const name = trainerPlayerName()?.name ?? "Trainee";
++  const gameID = generateID();
++  document.dispatchEvent(
++    new CustomEvent("join-lobby", {
++      detail: {
++        gameID,
++        gameStartInfo: {
++          gameID,
++          players: [
++            {
++              clientID: generateID(),
++              username: name,
++              clanTag: null,
++              cosmetics: {},
++            },
++          ],
++          config: {
++            gameMap,
++            gameMapSize: compact ? GameMapSize.Compact : GameMapSize.Normal,
++            gameType: GameType.Singleplayer,
++            gameMode: GameMode.FFA,
++            difficulty,
++            maxTimerValue: compact ? 10 : 15,
++            bots: compact ? 100 : 400,
++            nations: 1,
++            infiniteGold: false,
++            infiniteTroops: false,
++            donateGold: false,
++            donateTroops: false,
++            instantBuild: false,
++            randomSpawn: false,
++            spawnImmunityDuration: 30 * 10,
++            disabledUnits: [],
++            ...(trainerPolicy !== undefined ? { trainerPolicy } : {}),
++            trainerBotName: TRAINER_BOT_NAME,
++          },
++          lobbyCreatedAt: Date.now(),
++        },
++        source: "singleplayer",
++      },
++      bubbles: true,
++      composed: true,
++    }),
++  );
++}
+diff --git a/src/client/Utils.ts b/src/client/Utils.ts
+index c78c5a5f..bbb9af6b 100644
+--- a/src/client/Utils.ts
++++ b/src/client/Utils.ts
+@@ -18,6 +18,7 @@ import { ClientEnv } from "./ClientEnv";
+ import type { LangSelector } from "./LangSelector";
+ import { pagePin } from "./PagePin";
+ import { Platform } from "./Platform";
++import { isTrainer, trainerHome } from "./Trainer";
+ 
+ export const TUTORIAL_VIDEO_URL = "https://www.youtube.com/embed/7J5zwb_s_Cg";
+ 
+@@ -930,6 +931,7 @@ export function currentPagePath(path: string): string {
+  * lands on `latest` rather than back on the build they were leaving.
+  */
+ export function homeHref(): string {
++  if (isTrainer()) return trainerHome();
+   const siteHost = ClientEnv.siteHost();
+   if (siteHost !== undefined && window.location.host !== siteHost) {
+     return `https://${siteHost}/`;
+diff --git a/src/client/replay/LocalProcessing.ts b/src/client/replay/LocalProcessing.ts
+index 07e5334d..9fcb97c4 100644
+--- a/src/client/replay/LocalProcessing.ts
++++ b/src/client/replay/LocalProcessing.ts
+@@ -44,6 +44,14 @@ async function createProcessorWorker(): Promise<Worker> {
+   return new ProcessorWorker();
+ }
+ 
++// The processor is a Blob worker: a relative base ("" or a path, as on a site that
++// serves the game under a sub-path) can't be fetched from there, so it gets an
++// absolute one.
++function absoluteBase(base: string): string {
++  if (typeof location === "undefined") return base;
++  return new URL(base || "/", location.href).href.replace(/\/+$/, "");
++}
++
+ export function processInBrowser(
+   record: GameRecord,
+   handlers: ProcessingHandlers,
+@@ -106,7 +114,7 @@ export function processInBrowser(
+       engine.postMessage(connect, [channel.port1]);
+       const request: ProcessorRequest = {
+         record,
+-        cdnBase: getCdnBase(),
++        cdnBase: absoluteBase(getCdnBase()),
+         engine: channel.port2,
+       };
+       w.postMessage(request, [channel.port2]);
+diff --git a/src/client/replay/ReplayRecord.ts b/src/client/replay/ReplayRecord.ts
+index 901ff14d..1c85dc9c 100644
+--- a/src/client/replay/ReplayRecord.ts
++++ b/src/client/replay/ReplayRecord.ts
+@@ -11,6 +11,7 @@
+ import { GameRecord, GameRecordSchema } from "@openfront/shared/WireSchemas";
+ import { getApiBase } from "../ApiBase";
+ import { ClientEnv } from "../ClientEnv";
++import { isTrainer, TRAINER_API } from "../Trainer";
+ 
+ export type RecordResult =
+   | { kind: "record"; record: GameRecord }
+@@ -42,7 +43,7 @@ export async function fetchReplayRecord(
+     handedOver = null;
+     return { kind: "record", record };
+   }
+-  const apiBase = opts.apiBase ?? getApiBase();
++  const apiBase = opts.apiBase ?? (isTrainer() ? TRAINER_API : getApiBase());
+   const ownCommit = opts.ownCommit ?? ClientEnv.gitCommit();
+   const fetchFn = opts.fetchFn ?? fetch;
+   let res: Response;
+diff --git a/tests/NationCreation.test.ts b/tests/NationCreation.test.ts
+index 6cc2ada6..98942479 100644
+--- a/tests/NationCreation.test.ts
++++ b/tests/NationCreation.test.ts
+@@ -338,3 +338,20 @@ describe("createNationsForGame: additionalNations pool", () => {
+     expect(new Set(names).size).toBe(8);
+   });
+ });
++
++describe("createNationsForGame: TRAINER.PRO bot name", () => {
++  test("renames the nations and drops their flags, keeping spawn cells", () => {
++    const start = makeGameStart(1);
++    start.config.trainerBotName = "Teamstats.PRO";
++    const nations = createNationsForGame(
++      start,
++      makeManifestNations(4),
++      [],
++      0,
++      new PseudoRandom(1),
++    );
++    expect(nationNames(nations)).toEqual(["Teamstats.PRO"]);
++    expect(nations[0].playerInfo.nationFlag).toBeNull();
++    expect(nations[0].spawnCell).toBeDefined();
++  });
++});
+diff --git a/tests/TrainerBot.test.ts b/tests/TrainerBot.test.ts
+new file mode 100644
+index 00000000..84679fe4
+--- /dev/null
++++ b/tests/TrainerBot.test.ts
+@@ -0,0 +1,167 @@
++import {
++  Difficulty,
++  PlayerInfo,
++  PlayerType,
++  UnitType,
++} from "@openfront/engine-api/game/GameTypes";
++import {
++  Config,
++  NukeMagnitude,
++} from "@openfront/engine-lib/configuration/Config";
++import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
++import { NationAllianceBehavior } from "@openfront/engine/execution/nation/NationAllianceBehavior";
++import { NationEmojiBehavior } from "@openfront/engine/execution/nation/NationEmojiBehavior";
++import { NationNukeBehavior } from "@openfront/engine/execution/nation/NationNukeBehavior";
++import { AiAttackBehavior } from "@openfront/engine/execution/utils/AiAttackBehavior";
++import { Game, Player } from "@openfront/engine/game/Game";
++import { setup } from "./util/Setup";
++import { TestConfig } from "./util/TestConfig";
++
++class RealNukeRadiusConfig extends TestConfig {
++  nukeMagnitudes(unitType: UnitType): NukeMagnitude {
++    return Config.prototype.nukeMagnitudes.call(this, unitType);
++  }
++}
++
++function conquerRect(game: Game, p: Player, x0: number, x1: number) {
++  for (let x = x0; x < x1; x++) {
++    for (let y = 0; y < 200; y++) p.conquer(game.ref(x, y));
++  }
++}
++
++// TRAINER.PRO 1v1 on the all-land map: our bot left, the human right.
++async function trainerGame(gold: bigint) {
++  const game = await setup(
++    "big_plains",
++    { difficulty: Difficulty.Impossible, trainerBotName: "Teamstats.PRO" },
++    [
++      new PlayerInfo("bot", PlayerType.Nation, null, "bot_id"),
++      new PlayerInfo("human", PlayerType.Human, null, "human_id"),
++    ],
++    undefined,
++    RealNukeRadiusConfig,
++  );
++  const bot = game.player("bot_id");
++  const human = game.player("human_id");
++  conquerRect(game, bot, 0, 100);
++  conquerRect(game, human, 100, 200);
++  bot.buildUnit(UnitType.MissileSilo, game.ref(5, 5), {});
++  bot.addGold(gold);
++  const random = () => new PseudoRandom(1);
++  const emoji = new NationEmojiBehavior(random(), game, bot);
++  const alliance = new NationAllianceBehavior(random(), game, bot, emoji);
++  const attack = new AiAttackBehavior(
++    random(),
++    game,
++    bot,
++    0.5,
++    0.3,
++    0.2,
++    alliance,
++    emoji,
++  );
++  const nukes = new NationNukeBehavior(random(), game, bot, attack, emoji);
++  return { game, bot, human, nukes, alliance };
++}
++
++function bombs(game: Game, bot: Player, type: UnitType) {
++  for (let i = 0; i < 3; i++) game.executeNextTick();
++  return bot.units(type);
++}
++
++describe("TRAINER.PRO bot", () => {
++  test("nukes the opponent's missile silo", async () => {
++    const { game, bot, human, nukes } = await trainerGame(5_000_000n);
++    const silo = human.buildUnit(UnitType.MissileSilo, game.ref(180, 150), {});
++    nukes.maybeSendNuke();
++    const sent = bombs(game, bot, UnitType.AtomBomb);
++    expect(sent).toHaveLength(1);
++    expect(sent[0].targetTile()).toBe(silo.tile());
++  });
++
++  test("hydrogen bomb on the most cities once it has 5M gold and they have no silo", async () => {
++    const { game, bot, human, nukes } = await trainerGame(5_000_000n);
++    human.buildUnit(UnitType.City, game.ref(190, 20), {});
++    for (const [x, y] of [
++      [150, 150],
++      [152, 152],
++      [148, 151],
++    ]) {
++      human.buildUnit(UnitType.City, game.ref(x, y), {});
++    }
++    nukes.maybeSendNuke();
++    const sent = bombs(game, bot, UnitType.HydrogenBomb);
++    expect(sent).toHaveLength(1);
++    const target = sent[0].targetTile()!;
++    expect(game.x(target)).toBeLessThan(160);
++    expect(game.y(target)).toBeGreaterThan(140);
++  });
++
++  test("no hydrogen bomb below 5M gold", async () => {
++    const { game, bot, human, nukes } = await trainerGame(4_000_000n);
++    human.buildUnit(UnitType.City, game.ref(150, 150), {});
++    nukes.maybeSendNuke();
++    expect(bombs(game, bot, UnitType.HydrogenBomb)).toHaveLength(0);
++    expect(bot.units(UnitType.AtomBomb)).toHaveLength(0);
++  });
++
++  test("rejects every alliance request", async () => {
++    const { game, bot, human, alliance } = await trainerGame(0n);
++    for (let i = 0; i < 200; i++) game.executeNextTick();
++    const request = human.createAllianceRequest(bot);
++    expect(request).not.toBeNull();
++    alliance.handleAllianceRequests();
++    expect(bot.isAlliedWith(human)).toBe(false);
++    expect(bot.incomingAllianceRequests()).toHaveLength(0);
++  });
++});
++
++describe("TRAINER.PRO bot boats", () => {
++  test("boats far across the water to free land", async () => {
++    const game = await setup(
++      "world",
++      { difficulty: Difficulty.Impossible, trainerBotName: "Teamstats.PRO" },
++      [new PlayerInfo("bot", PlayerType.Nation, null, "bot_id")],
++    );
++    const bot = game.player("bot_id");
++    // A small coastal patch
++    let shore = -1;
++    game.forEachTile((t) => {
++      if (shore < 0 && game.isShore(t) && game.isLand(t)) shore = t;
++    });
++    const sx = game.x(shore);
++    const sy = game.y(shore);
++    for (let x = sx - 3; x <= sx + 3; x++) {
++      for (let y = sy - 3; y <= sy + 3; y++) {
++        if (game.isValidCoord(x, y) && game.isLand(game.ref(x, y))) {
++          bot.conquer(game.ref(x, y));
++        }
++      }
++    }
++    bot.addTroops(100_000);
++    const random = () => new PseudoRandom(1);
++    const emoji = new NationEmojiBehavior(random(), game, bot);
++    const alliance = new NationAllianceBehavior(random(), game, bot, emoji);
++    const attack = new AiAttackBehavior(
++      random(),
++      game,
++      bot,
++      0.5,
++      0.3,
++      0.2,
++      alliance,
++      emoji,
++    );
++    attack.maybeAttack();
++    for (let i = 0; i < 3; i++) game.executeNextTick();
++    const boats = bot.units(UnitType.TransportShip);
++    expect(boats.length).toBeGreaterThan(0);
++    // Sent far from home, not just to the next coast
++    const far = boats.some(
++      (b) =>
++        b.targetTile() !== undefined &&
++        game.manhattanDist(shore, b.targetTile()!) > 50,
++    );
++    expect(far).toBe(true);
++  });
++});
+diff --git a/tests/TrainerDefense.test.ts b/tests/TrainerDefense.test.ts
+new file mode 100644
+index 00000000..fc1aa284
+--- /dev/null
++++ b/tests/TrainerDefense.test.ts
+@@ -0,0 +1,81 @@
++import {
++  Difficulty,
++  PlayerInfo,
++  PlayerType,
++} from "@openfront/engine-api/game/GameTypes";
++import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
++import { AttackExecution } from "@openfront/engine/execution/AttackExecution";
++import { NationAllianceBehavior } from "@openfront/engine/execution/nation/NationAllianceBehavior";
++import { NationEmojiBehavior } from "@openfront/engine/execution/nation/NationEmojiBehavior";
++import { AiAttackBehavior } from "@openfront/engine/execution/utils/AiAttackBehavior";
++import { Game, Player } from "@openfront/engine/game/Game";
++import { setup } from "./util/Setup";
++
++function conquerRect(game: Game, p: Player, x0: number, x1: number) {
++  for (let x = x0; x < x1; x++) {
++    for (let y = 0; y < 200; y++) p.conquer(game.ref(x, y));
++  }
++}
++
++// TRAINER.PRO: humans throw nearly their whole army at the bot (27 replays, 2026-11-01).
++// With attack.defend on, the bot answers with its army instead of the few % its reserve left.
++async function allIn(defend: number) {
++  const game = await setup(
++    "big_plains",
++    {
++      difficulty: Difficulty.Impossible,
++      trainerBotName: "Teamstats.PRO",
++      trainerPolicy: JSON.stringify({
++        v: 1,
++        attack: { defend, reserveRatio: 0.6, expandRatio: 0.3 },
++      }),
++    },
++    [
++      new PlayerInfo("bot", PlayerType.Nation, null, "bot_id"),
++      new PlayerInfo("human", PlayerType.Human, null, "human_id"),
++    ],
++  );
++  const bot = game.player("bot_id");
++  const human = game.player("human_id");
++  conquerRect(game, bot, 0, 100);
++  conquerRect(game, human, 100, 200);
++  bot.addTroops(200_000 - bot.troops());
++  human.addTroops(250_000 - human.troops());
++  const random = () => new PseudoRandom(1);
++  const emoji = new NationEmojiBehavior(random(), game, bot);
++  const alliance = new NationAllianceBehavior(random(), game, bot, emoji);
++  const attack = new AiAttackBehavior(
++    random(),
++    game,
++    bot,
++    0.5,
++    0.6,
++    0.3,
++    alliance,
++    emoji,
++  );
++  game.addExecution(new AttackExecution(240_000, human, bot.id()));
++  game.executeNextTick();
++  game.executeNextTick();
++  const before = bot.troops();
++  const incoming = () =>
++    bot.incomingAttacks().reduce((s, a) => s + a.troops(), 0);
++  const coming = incoming();
++  (attack as unknown as { retaliate(): boolean }).retaliate();
++  game.executeNextTick();
++  game.executeNextTick();
++  // Opposite attacks cancel each other: what our answer took off theirs
++  return { before, sent: coming - incoming() };
++}
++
++describe("TRAINER.PRO bot defense", () => {
++  test("cancels an all-in with most of its army", async () => {
++    const { before, sent } = await allIn(1);
++    expect(sent).toBeGreaterThan(before * 0.7);
++  });
++
++  test("keeps the old small answer without attack.defend", async () => {
++    const { before, sent } = await allIn(0);
++    expect(sent).toBeLessThan(before * 0.5);
++  });
++});
+diff --git a/tests/TrainerRules.test.ts b/tests/TrainerRules.test.ts
+new file mode 100644
+index 00000000..51d2f829
+--- /dev/null
++++ b/tests/TrainerRules.test.ts
+@@ -0,0 +1,107 @@
++import {
++  Difficulty,
++  GameMapSize,
++  GameMapType,
++  GameMode,
++  GameType,
++  PlayerInfo,
++  PlayerType,
++} from "@openfront/engine-api/game/GameTypes";
++import { GameConfig } from "@openfront/engine-api/Schemas";
++import { EngineConfig } from "@openfront/engine/configuration/EngineConfig";
++import {
++  trainerAttackPlan,
++  trainerPolicy,
++} from "@openfront/engine/execution/nation/TrainerPolicy";
++import { Game } from "@openfront/engine/game/Game";
++
++function config(trainerBotName?: string): EngineConfig {
++  const c: GameConfig = {
++    gameMap: GameMapType.Australia,
++    gameMapSize: GameMapSize.Normal,
++    gameMode: GameMode.FFA,
++    gameType: GameType.Singleplayer,
++    difficulty: Difficulty.Impossible,
++    nations: 1,
++    donateGold: false,
++    donateTroops: false,
++    bots: 400,
++    infiniteGold: false,
++    infiniteTroops: false,
++    instantBuild: false,
++    randomSpawn: false,
++    ...(trainerBotName !== undefined ? { trainerBotName } : {}),
++  };
++  return new EngineConfig(c, false);
++}
++
++describe("TRAINER.PRO: the bot plays by human rules", () => {
++  const nation = new PlayerInfo("Bot", PlayerType.Nation, null, "nation1");
++  const human = new PlayerInfo("Me", PlayerType.Human, "client1", "human1");
++  test("Impossible nations normally start with more troops", () => {
++    expect(config().startManpower(nation)).toBeGreaterThan(
++      config().startManpower(human),
++    );
++  });
++  test("the trainer bot starts like a human", () => {
++    const c = config("Teamstats.PRO");
++    expect(c.startManpower(nation)).toBe(c.startManpower(human));
++  });
++});
++
++describe("TRAINER.PRO: policy per map and pro attack plan", () => {
++  const game = (map: GameMapType, policy: object) =>
++    ({
++      config: () => ({
++        gameConfig: () => ({
++          gameMap: map,
++          trainerBotName: "Teamstats.PRO",
++          trainerPolicy: JSON.stringify(policy),
++        }),
++      }),
++    }) as unknown as Game;
++  const policy = {
++    v: 1,
++    attack: { triggerRatio: 0.5, punchRatio: 0.05 },
++    maps: { Iceland: { attack: { punchRatio: 0.1 } } },
++  };
++  test("a map's own numbers go on top of the rest", () => {
++    const iceland = trainerPolicy(game(GameMapType.Iceland, policy));
++    expect(iceland?.attack).toEqual({ triggerRatio: 0.5, punchRatio: 0.1 });
++    const asia = trainerPolicy(game(GameMapType.Asia, policy));
++    expect(asia?.attack).toEqual({ triggerRatio: 0.5, punchRatio: 0.05 });
++  });
++  test("pros keep troops near fastest growth and punch with ~7% boats", () => {
++    const plan = trainerAttackPlan(game(GameMapType.Asia, { v: 1 }));
++    expect(plan).toEqual({
++      growth: 0.42,
++      punch: 0.07,
++      crush: 2,
++      raidEvery: null,
++      raidTicks: 30,
++      cutoff: 0,
++      breakOut: 0.3,
++      press: 1.2,
++      stackEvery: null,
++      stackRatio: 0.4,
++      snipeTiles: 400,
++      botRamp: 900,
++      lookahead: 0.5,
++      braceTicks: 150,
++      atomGold: 0,
++      defend: false,
++      trickle: false,
++    });
++  });
++
++  test("the new defense is on only when the policy says so", () => {
++    expect(
++      trainerAttackPlan(game(GameMapType.Asia, { v: 1, attack: { defend: 1 } }))
++        ?.defend,
++    ).toBe(true);
++    expect(
++      trainerAttackPlan(game(GameMapType.Asia, { v: 1, attack: { defend: 0 } }))
++        ?.defend,
++    ).toBe(false);
++  });
++});
+diff --git a/tests/TrainerSpawn.test.ts b/tests/TrainerSpawn.test.ts
+new file mode 100644
+index 00000000..65efcec3
+--- /dev/null
++++ b/tests/TrainerSpawn.test.ts
+@@ -0,0 +1,108 @@
++import {
++  Cell,
++  Difficulty,
++  Nation,
++  PlayerInfo,
++  PlayerType,
++} from "@openfront/engine-api/game/GameTypes";
++import { NationExecution } from "@openfront/engine/execution/NationExecution";
++import { SpawnExecution } from "@openfront/engine/execution/SpawnExecution";
++import { Game, Player } from "@openfront/engine/game/Game";
++import { setup } from "./util/Setup";
++import { TestConfig } from "./util/TestConfig";
++
++const GAME_ID = "trainer_spawn";
++
++// TRAINER.PRO: the bot's SpawnExecution can find its tile taken when it runs (another
++// spawn landed there the same tick). It used to never try again, so the bot never showed up.
++async function botWhoseSpawnFails(): Promise<{
++  game: Game;
++  bot: Player;
++  human: Player;
++}> {
++  const nation = new Nation(
++    new Cell(50, 50),
++    new PlayerInfo("Teamstats.PRO", PlayerType.Nation, null, "bot_id"),
++  );
++  const game = await setup(
++    "big_plains",
++    { difficulty: Difficulty.Impossible, trainerBotName: "Teamstats.PRO" },
++    [],
++    undefined,
++    TestConfig,
++    false,
++    [nation],
++  );
++  // Self-play has no human: the bot spawns in the spawn phase (with one it waits, below)
++  const human = game.addPlayer(
++    new PlayerInfo("other", PlayerType.Bot, null, "other_id"),
++  );
++  game.addExecution(new NationExecution(GAME_ID, game.nations()[0]));
++  const queued = () =>
++    (game as unknown as { executions(): unknown[] })
++      .executions()
++      .some((e) => e instanceof SpawnExecution);
++  for (let i = 0; i < 20 && !queued(); i++) game.executeNextTick();
++  expect(queued()).toBe(true);
++  // Before it runs, the whole land around the bot's spawn cell gets taken
++  for (let x = 0; x < 120; x++) {
++    for (let y = 0; y < 120; y++) human.conquer(game.ref(x, y));
++  }
++  game.executeNextTick();
++  const bot = game.player("bot_id");
++  expect(bot.hasSpawned()).toBe(false);
++  for (const t of Array.from(human.tiles())) human.relinquish(t);
++  return { game, bot, human };
++}
++
++describe("TRAINER.PRO bot spawn", () => {
++  test("waits for the human, then spawns away from them", async () => {
++    const nation = new Nation(
++      new Cell(50, 50),
++      new PlayerInfo("Teamstats.PRO", PlayerType.Nation, null, "bot_id"),
++    );
++    const game = await setup(
++      "big_plains",
++      { difficulty: Difficulty.Impossible, trainerBotName: "Teamstats.PRO" },
++      [],
++      undefined,
++      TestConfig,
++      false,
++      [nation],
++    );
++    const info = new PlayerInfo(
++      "human",
++      PlayerType.Human,
++      "client_h",
++      "human_id",
++    );
++    game.addPlayer(info);
++    game.addExecution(new NationExecution(GAME_ID, game.nations()[0]));
++    for (let i = 0; i < 20; i++) game.executeNextTick();
++    const bot = game.player("bot_id");
++    expect(bot.hasSpawned()).toBe(false);
++    game.addExecution(new SpawnExecution(GAME_ID, info, game.ref(60, 60)));
++    game.executeNextTick();
++    game.endSpawnPhase();
++    for (let i = 0; i < 10; i++) game.executeNextTick();
++    expect(bot.hasSpawned()).toBe(true);
++    expect(
++      Math.sqrt(game.euclideanDistSquared(bot.spawnTile()!, game.ref(60, 60))),
++    ).toBeGreaterThan(20);
++  });
++
++  test("tries again in the spawn phase after its spawn failed", async () => {
++    const { game, bot } = await botWhoseSpawnFails();
++    for (let i = 0; i < 10; i++) game.executeNextTick();
++    expect(game.inSpawnPhase()).toBe(true);
++    expect(bot.hasSpawned()).toBe(true);
++  });
++
++  test("still spawns when the spawn phase ended after its spawn failed", async () => {
++    const { game, bot } = await botWhoseSpawnFails();
++    game.endSpawnPhase();
++    for (let i = 0; i < 10; i++) game.executeNextTick();
++    expect(bot.hasSpawned()).toBe(true);
++    expect(bot.numTilesOwned()).toBeGreaterThan(0);
++  });
++});

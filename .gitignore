@@ -1,0 +1,6 @@
+node_modules/
+tools/replay-engine/engines/
+tools/replay-engine/tmp/
+
+tools/of-*/
+trainer/play/

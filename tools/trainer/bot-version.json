@@ -1,0 +1,4 @@
+{
+  "note": "Updates of the bot's code since v1.00 (2026-10-15). Bump with: node tools/trainer/bump-version.cjs",
+  "updates": 9
+}
